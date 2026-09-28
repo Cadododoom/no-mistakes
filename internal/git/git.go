@@ -715,10 +715,12 @@ func CommitAll(ctx context.Context, dir, message string) error {
 // falls through to the daemon host's ambient or auto-detected identity - a
 // wrong attribution an immutable commit object can never shed (issue #924).
 //
-// Resolution mirrors `git commit` run in srcDir: the effective user.name and
-// user.email across the whole config stack (local wins over global and
-// system, and includeIf sections keyed on the checkout's remote apply) are
-// stamped into dstDir, not just the repository-local keys. GIT_AUTHOR_*,
+// Resolution mirrors `git commit` run in srcDir: the effective identity keys
+// across the whole config stack (local wins over global and system, and
+// includeIf sections keyed on the checkout's remote apply) are stamped into
+// dstDir, not just the repository-local keys. author.* and committer.* are
+// copied alongside user.* so a checkout that overrides one role keeps that
+// role-specific identity on its pipeline commits. GIT_AUTHOR_*,
 // GIT_COMMITTER_* and GIT_CONFIG_* already in the daemon's environment keep
 // their normal precedence over the stamped values, the same precedence they
 // have for the operator's own commits.
@@ -731,7 +733,10 @@ func CommitAll(ctx context.Context, dir, message string) error {
 // on that single lock and one fails with "could not lock config file ...
 // config: File exists". Writing per-worktree puts each run's identity in its own
 // <bare>/worktrees/<id>/config.worktree, so concurrent startups never contend.
-// Older Git without `--worktree` support falls back to `--local`.
+// Older Git without `--worktree` support falls back to `--local`, the shared
+// config: every identity key is cleared there first, because a value left by
+// an earlier run would otherwise satisfy the binding for a checkout that
+// carries no identity at all.
 //
 // After stamping, the binding is verified with the same resolution a commit in
 // dstDir performs: `git var` under user.useConfigOnly honors config and the
@@ -740,27 +745,38 @@ func CommitAll(ctx context.Context, dir, message string) error {
 // fails here rather than publishing commits under whatever ambient identity
 // the daemon host happens to have.
 func BindUserIdentity(ctx context.Context, srcDir, dstDir string) error {
-	for _, key := range []string{"user.name", "user.email"} {
+	values := make(map[string]string, len(identityKeys))
+	for _, key := range identityKeys {
 		value, err := Run(ctx, srcDir, "config", "--get", "--default", "", key)
 		if err != nil {
 			return err
 		}
-		if value == "" {
-			continue
+		values[key] = value
+	}
+	// Probe per-worktree config availability before writing: a probe is
+	// needed even when the checkout supplies no identity, because on the
+	// shared --local fallback every identity key must be cleared first - a
+	// value left there by an earlier run would otherwise satisfy the binding
+	// for a checkout that carries none.
+	scope := "--worktree"
+	if _, err := Run(ctx, dstDir, "config", "--worktree", "--list"); err != nil {
+		if !isWorktreeConfigWriteUnavailable(err) {
+			return err
 		}
-		if _, err := Run(ctx, dstDir, "config", "--worktree", key, value); err != nil {
-			if !isWorktreeConfigWriteUnavailable(err) {
+		// Per-worktree config is not usable here (Git too old for the
+		// flag, or the repo has multiple worktrees without
+		// extensions.worktreeConfig enabled). Fall back to the shared
+		// local config. Such gates also lack per-worktree isolation, so
+		// this matches the legacy behavior.
+		scope = "--local"
+		for _, key := range identityKeys {
+			if _, err := Run(ctx, dstDir, "config", "--local", "--unset-all", key); err != nil && !isConfigKeyAbsent(err) {
 				return err
 			}
-			// Per-worktree config is not usable here (Git too old for the
-			// flag, or the repo has multiple worktrees without
-			// extensions.worktreeConfig enabled). Fall back to the shared
-			// local config. Such gates also lack per-worktree isolation, so
-			// this matches the legacy behavior.
-			if _, err := Run(ctx, dstDir, "config", "--local", key, value); err != nil {
-				return err
-			}
 		}
+	}
+	if err := writeIdentityConfig(ctx, dstDir, scope, values); err != nil {
+		return err
 	}
 	for _, ident := range []string{"GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"} {
 		if _, err := Run(ctx, dstDir, "-c", "user.useConfigOnly=true", "var", ident); err != nil {
@@ -771,6 +787,34 @@ func BindUserIdentity(ctx context.Context, srcDir, dstDir string) error {
 		}
 	}
 	return nil
+}
+
+// identityKeys are the config keys a commit in the operator's checkout can
+// resolve its author and committer from: user.* backs both roles and
+// author.* / committer.* override it per role.
+var identityKeys = []string{
+	"user.name", "user.email",
+	"author.name", "author.email",
+	"committer.name", "committer.email",
+}
+
+func writeIdentityConfig(ctx context.Context, dir, scope string, values map[string]string) error {
+	for _, key := range identityKeys {
+		if values[key] == "" {
+			continue
+		}
+		if _, err := Run(ctx, dir, "config", scope, key, values[key]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// isConfigKeyAbsent reports whether a `git config` read/unset failed only
+// because the key is not set (exit code 5).
+func isConfigKeyAbsent(err error) bool {
+	var ee *exec.ExitError
+	return errors.As(err, &ee) && ee.ExitCode() == 5
 }
 
 // isWorktreeConfigWriteUnavailable reports whether a `git config --worktree`

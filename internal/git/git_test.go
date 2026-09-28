@@ -265,6 +265,83 @@ func TestBindUserIdentityEnvironmentBinds(t *testing.T) {
 	}
 }
 
+func TestBindUserIdentityPropagatesRoleSpecificIdentity(t *testing.T) {
+	ctx := context.Background()
+
+	parent := t.TempDir()
+	src := filepath.Join(parent, "src")
+	dst := filepath.Join(parent, "dst")
+	run(t, parent, "git", "init", src)
+	run(t, parent, "git", "init", dst)
+
+	run(t, src, "git", "config", "user.name", "Generic User")
+	run(t, src, "git", "config", "user.email", "generic@example.com")
+	run(t, src, "git", "config", "author.name", "Author User")
+	run(t, src, "git", "config", "author.email", "author@example.com")
+
+	for _, k := range []string{
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+	} {
+		if v, ok := os.LookupEnv(k); ok {
+			os.Unsetenv(k)
+			t.Cleanup(func() { os.Setenv(k, v) })
+		}
+	}
+
+	if err := BindUserIdentity(ctx, src, dst); err != nil {
+		t.Fatalf("BindUserIdentity failed: %v", err)
+	}
+	if got := run(t, dst, "git", "var", "GIT_AUTHOR_IDENT"); !strings.HasPrefix(got, "Author User <author@example.com>") {
+		t.Fatalf("author ident = %q, want role-specific author identity", got)
+	}
+	if got := run(t, dst, "git", "var", "GIT_COMMITTER_IDENT"); !strings.HasPrefix(got, "Generic User <generic@example.com>") {
+		t.Fatalf("committer ident = %q, want generic committer identity", got)
+	}
+}
+
+func TestBindUserIdentityClearsStaleIdentityOnLocalFallback(t *testing.T) {
+	ctx := context.Background()
+
+	parent := t.TempDir()
+	src := filepath.Join(parent, "src")
+	run(t, parent, "git", "init", src)
+
+	// dst is a linked worktree of a gate without extensions.worktreeConfig,
+	// so identity config falls back to the gate's shared local config - which
+	// an earlier run has already stamped.
+	gate := filepath.Join(parent, "gate")
+	run(t, parent, "git", "init", gate)
+	run(t, gate, "git", "config", "user.name", "Stale User")
+	run(t, gate, "git", "config", "user.email", "stale@example.com")
+	writeFile(t, filepath.Join(gate, "README.md"), "# gate\n")
+	run(t, gate, "git", "add", ".")
+	run(t, gate, "git", "commit", "-m", "initial")
+	dst := filepath.Join(parent, "wt")
+	run(t, gate, "git", "worktree", "add", "--detach", dst)
+
+	for _, k := range []string{
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+	} {
+		if v, ok := os.LookupEnv(k); ok {
+			os.Unsetenv(k)
+			t.Cleanup(func() { os.Setenv(k, v) })
+		}
+	}
+
+	err := BindUserIdentity(ctx, src, dst)
+	if err == nil {
+		t.Fatal("BindUserIdentity succeeded with no bindable identity; stale shared config leaked")
+	}
+	if !strings.Contains(err.Error(), "cannot bind a git identity") {
+		t.Fatalf("error = %q, want bind failure", err)
+	}
+	if got := run(t, dst, "git", "config", "--local", "--get", "--default", "", "user.name"); got != "" {
+		t.Fatalf("stale user.name survived in shared config: %q", got)
+	}
+}
+
 func TestGetRemoteURLNotFound(t *testing.T) {
 	dir := initTestRepo(t)
 	ctx := context.Background()
