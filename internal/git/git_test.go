@@ -300,7 +300,7 @@ func TestBindUserIdentityPropagatesRoleSpecificIdentity(t *testing.T) {
 	}
 }
 
-func TestBindUserIdentityClearsStaleIdentityOnLocalFallback(t *testing.T) {
+func TestBindUserIdentityRefusesStaleSharedIdentityOnLocalFallback(t *testing.T) {
 	ctx := context.Background()
 
 	parent := t.TempDir()
@@ -309,7 +309,55 @@ func TestBindUserIdentityClearsStaleIdentityOnLocalFallback(t *testing.T) {
 
 	// dst is a linked worktree of a gate without extensions.worktreeConfig,
 	// so identity config falls back to the gate's shared local config - which
-	// an earlier run has already stamped.
+	// an earlier run has already stamped with a different identity, including
+	// role keys this checkout does not set.
+	gate := filepath.Join(parent, "gate")
+	run(t, parent, "git", "init", gate)
+	run(t, gate, "git", "config", "user.name", "Stale User")
+	run(t, gate, "git", "config", "user.email", "stale@example.com")
+	run(t, gate, "git", "config", "author.name", "Stale Author")
+	run(t, gate, "git", "config", "author.email", "stale-author@example.com")
+	writeFile(t, filepath.Join(gate, "README.md"), "# gate\n")
+	run(t, gate, "git", "add", ".")
+	run(t, gate, "git", "commit", "-m", "initial")
+	dst := filepath.Join(parent, "wt")
+	run(t, gate, "git", "worktree", "add", "--detach", dst)
+
+	run(t, src, "git", "config", "user.name", "Current User")
+	run(t, src, "git", "config", "user.email", "current@example.com")
+
+	for _, k := range []string{
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+	} {
+		if v, ok := os.LookupEnv(k); ok {
+			os.Unsetenv(k)
+			t.Cleanup(func() { os.Setenv(k, v) })
+		}
+	}
+
+	err := BindUserIdentity(ctx, src, dst)
+	if err == nil {
+		t.Fatal("BindUserIdentity succeeded despite a stale shared-config identity")
+	}
+	if !strings.Contains(err.Error(), "cannot bind a git identity") {
+		t.Fatalf("error = %q, want bind failure", err)
+	}
+	// The stamp writes our values over the stale ones (legacy fallback
+	// behavior), but the bind attempt must never clear keys an active run
+	// may be using.
+	if got := run(t, dst, "git", "config", "--local", "--get", "--default", "", "user.name"); got != "Current User" {
+		t.Fatalf("user.name = %q, want stamped value", got)
+	}
+}
+
+func TestBindUserIdentityRefusesNoIdentityEvenWithStaleSharedConfig(t *testing.T) {
+	ctx := context.Background()
+
+	parent := t.TempDir()
+	src := filepath.Join(parent, "src")
+	run(t, parent, "git", "init", src)
+
 	gate := filepath.Join(parent, "gate")
 	run(t, parent, "git", "init", gate)
 	run(t, gate, "git", "config", "user.name", "Stale User")
@@ -337,8 +385,9 @@ func TestBindUserIdentityClearsStaleIdentityOnLocalFallback(t *testing.T) {
 	if !strings.Contains(err.Error(), "cannot bind a git identity") {
 		t.Fatalf("error = %q, want bind failure", err)
 	}
-	if got := run(t, dst, "git", "config", "--local", "--get", "--default", "", "user.name"); got != "" {
-		t.Fatalf("stale user.name survived in shared config: %q", got)
+	// The stale keys must be left untouched - an active run may be using them.
+	if got := run(t, dst, "git", "config", "--local", "--get", "--default", "", "user.name"); got != "Stale User" {
+		t.Fatalf("stale user.name = %q, want it left untouched", got)
 	}
 }
 
