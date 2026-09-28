@@ -1828,7 +1828,15 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		state.Safety = "blocked_closed"
 		return state, run, true
 	}
-	if ptr(run.PushRef) != "refs/heads/"+branch || ptr(run.PushTargetFingerprint) != TargetFingerprint(s.Repo.PushURL()) || ptr(run.PushTargetKind) != targetKind(s.Repo) {
+	// The run's bound publish ref - a per-run --push-branch binding, else the
+	// branch the push arrived on - is what the recorded PushRef must still
+	// equal. Comparing against the caller's local branch would misclassify
+	// every deliberately bound run as target-changed.
+	expectedPushRef := "refs/heads/" + branch
+	if run.PushBranch != nil && strings.TrimSpace(*run.PushBranch) != "" {
+		expectedPushRef = "refs/heads/" + strings.TrimSpace(*run.PushBranch)
+	}
+	if ptr(run.PushRef) != expectedPushRef || ptr(run.PushTargetFingerprint) != TargetFingerprint(s.Repo.PushURL()) || ptr(run.PushTargetKind) != targetKind(s.Repo) {
 		state.State = StateTargetChanged
 		state.Safety = "blocked_target_changed"
 		state.Error = "the configured push target or branch ref changed after the pipeline push"

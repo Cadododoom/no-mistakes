@@ -125,6 +125,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			pushBranch, err := parsePushBranchPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			omitIntent, err := parseOmitIntentPushOptions(pushOptions)
 			if err != nil {
 				return err
@@ -170,6 +174,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				LaunchNonce:            launchNonce,
 				ValidationGeneration:   validationGeneration,
 				PRBaseBranch:           prBaseBranch,
+				PushBranch:             pushBranch,
 				OmitIntent:             omitIntent,
 				PiProfile:              piProfile,
 				VerificationPlanID:     verificationPlanID,
@@ -339,6 +344,37 @@ func parsePRBaseBranchPushOptions(options []string) (string, error) {
 		}
 		if strings.TrimSpace(value) == "" {
 			return "", fmt.Errorf("pr base branch push option must not be empty")
+		}
+		branch = value
+	}
+	return branch, nil
+}
+
+// pushBranchPushOptionPrefix carries a per-run publish/PR head branch through a
+// git push (axi run --push-branch).
+const pushBranchPushOptionPrefix = "no-mistakes.push-branch="
+
+// formatPushBranchPushOption encodes a per-run publish branch as a push
+// option, or returns "" when unset.
+func formatPushBranchPushOption(branch string) string {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return ""
+	}
+	return pushBranchPushOptionPrefix + branch
+}
+
+// parsePushBranchPushOptions extracts the per-run publish branch push option,
+// if any. The last occurrence wins.
+func parsePushBranchPushOptions(options []string) (string, error) {
+	branch := ""
+	for _, option := range options {
+		value, ok := strings.CutPrefix(option, pushBranchPushOptionPrefix)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(value) == "" {
+			return "", fmt.Errorf("push branch push option must not be empty")
 		}
 		branch = value
 	}
