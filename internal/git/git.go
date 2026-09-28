@@ -707,8 +707,21 @@ func CommitAll(ctx context.Context, dir, message string) error {
 	return err
 }
 
-// CopyLocalUserIdentity copies local user.name and user.email from srcDir into
-// dstDir. Missing values in srcDir are ignored.
+// BindUserIdentity binds the commit identity the run worktree at dstDir will
+// use to the identity effective in the operator's checkout at srcDir, so every
+// pipeline-authored commit is published by the same party as the operator's
+// own commits. A gate repository is a bare clone, and clone carries no
+// repository-local config, so without this binding every pipeline commit
+// falls through to the daemon host's ambient or auto-detected identity - a
+// wrong attribution an immutable commit object can never shed (issue #924).
+//
+// Resolution mirrors `git commit` run in srcDir: the effective user.name and
+// user.email across the whole config stack (local wins over global and
+// system, and includeIf sections keyed on the checkout's remote apply) are
+// stamped into dstDir, not just the repository-local keys. GIT_AUTHOR_*,
+// GIT_COMMITTER_* and GIT_CONFIG_* already in the daemon's environment keep
+// their normal precedence over the stamped values, the same precedence they
+// have for the operator's own commits.
 //
 // The write into dstDir uses per-worktree scope (`git config --worktree`) when
 // the repository has worktree config enabled. dstDir is typically a linked
@@ -719,9 +732,16 @@ func CommitAll(ctx context.Context, dir, message string) error {
 // config: File exists". Writing per-worktree puts each run's identity in its own
 // <bare>/worktrees/<id>/config.worktree, so concurrent startups never contend.
 // Older Git without `--worktree` support falls back to `--local`.
-func CopyLocalUserIdentity(ctx context.Context, srcDir, dstDir string) error {
+//
+// After stamping, the binding is verified with the same resolution a commit in
+// dstDir performs: `git var` under user.useConfigOnly honors config and the
+// environment but refuses to answer from auto-detection. When neither can
+// establish an author and a committer, the worktree is unbound and the run
+// fails here rather than publishing commits under whatever ambient identity
+// the daemon host happens to have.
+func BindUserIdentity(ctx context.Context, srcDir, dstDir string) error {
 	for _, key := range []string{"user.name", "user.email"} {
-		value, err := Run(ctx, srcDir, "config", "--local", "--get", "--default", "", key)
+		value, err := Run(ctx, srcDir, "config", "--get", "--default", "", key)
 		if err != nil {
 			return err
 		}
@@ -740,6 +760,14 @@ func CopyLocalUserIdentity(ctx context.Context, srcDir, dstDir string) error {
 			if _, err := Run(ctx, dstDir, "config", "--local", key, value); err != nil {
 				return err
 			}
+		}
+	}
+	for _, ident := range []string{"GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"} {
+		if _, err := Run(ctx, dstDir, "-c", "user.useConfigOnly=true", "var", ident); err != nil {
+			return fmt.Errorf("cannot bind a git identity for pipeline commits: no %s resolves "+
+				"from the checkout's config, the worktree, or the environment - set user.name and "+
+				"user.email in the checkout (or export GIT_AUTHOR_*/GIT_COMMITTER_* for the daemon) "+
+				"so commits are not published under an ambient identity", ident)
 		}
 	}
 	return nil
