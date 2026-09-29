@@ -1687,23 +1687,26 @@ func TestReviewStep_AllIgnoredCannotSuppressTrustedReview(t *testing.T) {
 }
 
 // A rule's displayed file list must agree with the held-to coverage list:
-// showing a file the trusted branch's own ignore_patterns also excludes
-// invites the reviewer to report it in reviewed_paths, which then parks the
-// round on out-of-scope coverage. Blocks keep only their still-reviewable
-// matched files, a block left with none is dropped from the prompt, and the
-// step log names it as matching only ignored paths rather than looking
-// identical to a rule that matched nothing.
+// showing a file that sits outside the reviewable set invites the reviewer
+// to report it in reviewed_paths, which then parks the round on out-of-scope
+// coverage - while a trusted-ignored file that survived the pushed list is
+// still in the set and still belongs to its rule. Blocks keep only their
+// still-reviewable matched files, a block left with none is dropped from
+// the prompt, and the step log names it as matching only ignored paths
+// rather than looking identical to a rule that matched nothing.
 func TestReviewStep_TrustedIgnoredFilesAreNotClaimedByRuleBlocks(t *testing.T) {
 	t.Parallel()
 
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	// The branch adds files both config copies ignore: keep.go survives
-	// (covered by *.go), vendor/x.go and pkg/dropped.go are ignored by
-	// pushed AND trusted lists, and a vendor-only rule matches nothing
-	// reviewable at all.
+	// The branch adds files the ignore lists treat three ways: keep.go and
+	// loose.go survive the pushed list (loose.go is additionally ignored on
+	// the trusted copy alone, but a survivor still belongs to its rule),
+	// vendor/x.go and pkg/dropped.go are ignored by pushed AND trusted
+	// lists, and a vendor-only rule matches nothing reviewable at all.
 	for name, content := range map[string]string{
 		".no-mistakes.yaml": "ignore_patterns:\n  - 'vendor/**'\n  - 'pkg/**'\n",
 		"keep.go":           "package main\n",
+		"loose.go":          "package main\n",
 		"vendor/x.go":       "package vendor\n",
 		"pkg/dropped.go":    "package pkg\n",
 	} {
@@ -1727,7 +1730,9 @@ func TestReviewStep_TrustedIgnoredFilesAreNotClaimedByRuleBlocks(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
 	sctx.Config.IgnorePatterns = []string{"vendor/**", "pkg/**"}
-	sctx.Config.TrustedIgnorePatterns = []string{"vendor/**", "pkg/**"}
+	// loose.go is ignored on the trusted copy alone: the pushed branch left
+	// it a survivor, so it stays reviewable and its rule still claims it.
+	sctx.Config.TrustedIgnorePatterns = []string{"vendor/**", "pkg/**", "loose.go"}
 	sctx.Config.Review = config.Review{PathInstructions: []config.PathInstruction{
 		{Path: "*.txt", Instructions: "Review every fixture modification."},
 		{Path: "*.go", Instructions: "Review every Go file."},
@@ -1743,8 +1748,9 @@ func TestReviewStep_TrustedIgnoredFilesAreNotClaimedByRuleBlocks(t *testing.T) {
 		t.Fatalf("reviewer calls = %d, want 1", len(ag.calls))
 	}
 	prompt := ag.calls[0].Prompt
-	// Survivors and their still-covered rules stay in the prompt.
-	for _, want := range []string{"feature.txt", "keep.go", "Review every Go file.", "Review every fixture modification."} {
+	// Survivors and their still-covered rules stay in the prompt - loose.go
+	// included, even though the trusted ignore list alone excludes it.
+	for _, want := range []string{"feature.txt", "keep.go", "loose.go", "Review every Go file.", "Review every fixture modification."} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("review prompt missing %q", want)
 		}
@@ -1758,7 +1764,7 @@ func TestReviewStep_TrustedIgnoredFilesAreNotClaimedByRuleBlocks(t *testing.T) {
 	}
 	foundIgnoredLog := false
 	for _, msg := range logs {
-		if strings.Contains(msg, "matched only paths the default branch ignores") && strings.Contains(msg, "vendor/**") {
+		if strings.Contains(msg, "matched only paths the ignore lists exclude") && strings.Contains(msg, "vendor/**") {
 			foundIgnoredLog = true
 		}
 	}

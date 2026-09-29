@@ -21,9 +21,9 @@ type pathInstructionBlock struct {
 // The non-matching and dropped sets exist so the step can say which rules it
 // applied and which it did not; a rule that matched nothing and a rule that was
 // discarded must not look the same in the log. IgnoredIDs names the blocks
-// every matched file of which the trusted branch's own ignore_patterns also
-// excludes: their glob fired, but the maintainer's own ignores keep those
-// files skipped, so the prompt must not claim them.
+// every matched file of which sits outside the reviewable set: their glob
+// fired, but only on paths the ignore lists leave skipped, so the prompt must
+// not claim them.
 type pathInstructionMatches struct {
 	Blocks       []pathInstructionBlock
 	IgnoredIDs   []string
@@ -97,25 +97,30 @@ func matchingChangedPaths(changed []string, pattern string) []string {
 	return files
 }
 
-// scopePathInstructionMatches narrows the selected blocks to what the run's
-// coverage contract will claim: a file the trusted default branch's own
-// ignore_patterns also excludes stays skipped, so the prompt must not list it
-// under the rule - a reviewer that reports it in reviewed_paths would park
-// the round on out-of-scope coverage. A block left with no files is dropped
-// from the prompt entirely (its glob matched, but every file it claimed is
-// skipped) and reported through IgnoredIDs so it does not read as an
-// unmatched rule. The returned value shares every untouched field with the
-// input, so it is the single view the union, the prompt, and the log consume.
-func scopePathInstructionMatches(matches pathInstructionMatches, trustedIgnorePatterns []string) pathInstructionMatches {
-	if len(trustedIgnorePatterns) == 0 {
-		return matches
+// scopePathInstructionMatches narrows the selected blocks to the files the
+// run's coverage contract actually holds the reviewer to: a matched file that
+// is not in the reviewable set - skipped by pushed and trusted ignores alike
+// - must not be listed under the rule, or a reviewer that reports it in
+// reviewed_paths parks the round on out-of-scope coverage. A file the trusted
+// ignore list excludes but the pushed list does not stays in reviewable as a
+// survivor, so the rule still claims it; only files dropped from the set
+// entirely are hidden. A block left with no files is dropped from the prompt
+// (its glob matched, but every file it claimed is skipped) and reported
+// through IgnoredIDs so it does not read as an unmatched rule. The returned
+// value shares every untouched field with the input, and it is computed only
+// after the union settles the reviewable set, so the prompt and the log
+// consume exactly what the coverage contract claims.
+func scopePathInstructionMatches(matches pathInstructionMatches, reviewable []string) pathInstructionMatches {
+	held := make(map[string]bool, len(reviewable))
+	for _, path := range reviewable {
+		held[path] = true
 	}
 	out := matches
 	out.Blocks = nil
 	for _, block := range matches.Blocks {
 		files := make([]string, 0, len(block.Files))
 		for _, file := range block.Files {
-			if !ignoredByPatterns(file, trustedIgnorePatterns) {
+			if held[file] {
 				files = append(files, file)
 			}
 		}
@@ -215,7 +220,7 @@ func logPathInstructions(log func(string), matches pathInstructionMatches) {
 		log(fmt.Sprintf("%d trusted review instruction rule(s) matched no changed path: %s", len(matches.UnmatchedIDs), strings.Join(matches.UnmatchedIDs, ", ")))
 	}
 	if len(matches.IgnoredIDs) > 0 {
-		log(fmt.Sprintf("%d trusted review instruction rule(s) matched only paths the default branch ignores: %s", len(matches.IgnoredIDs), strings.Join(matches.IgnoredIDs, ", ")))
+		log(fmt.Sprintf("%d trusted review instruction rule(s) matched only paths the ignore lists exclude: %s", len(matches.IgnoredIDs), strings.Join(matches.IgnoredIDs, ", ")))
 	}
 	if len(matches.DuplicateIDs) > 0 {
 		log(fmt.Sprintf("skipped %d duplicate trusted review instruction rule(s): %s", len(matches.DuplicateIDs), strings.Join(matches.DuplicateIDs, ", ")))
