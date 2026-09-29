@@ -163,6 +163,12 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			}
 			defer client.Close()
 
+			if pushBranch != "" {
+				if err := probeDaemonPushBranch(client); err != nil {
+					return err
+				}
+			}
+
 			var result ipc.PushReceivedResult
 			return client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
 				Gate:                   gatePath,
@@ -436,6 +442,21 @@ func probeDaemonOmitIntent(client *ipc.Client) error {
 	}
 	if err != nil {
 		return fmt.Errorf("the running daemon is too old to honor --no-publish-intent (%v); restart it with `no-mistakes daemon restart` so the current binary serves it", err)
+	}
+	return nil
+}
+
+// probeDaemonPushBranch asks the daemon for the push-branch capability, same
+// contract as probeDaemonOmitIntent: an older daemon silently drops the
+// push_branch field and would run unbound, publishing onto the local branch.
+func probeDaemonPushBranch(client *ipc.Client) error {
+	var result ipc.ProbePushBranchResult
+	err := client.Call(ipc.MethodProbePushBranch, &ipc.ProbePushBranchParams{}, &result)
+	if err == nil && !result.OK {
+		err = errors.New("daemon declined the push-branch capability")
+	}
+	if err != nil {
+		return fmt.Errorf("the running daemon is too old to honor --push-branch (%v); restart it with `no-mistakes daemon restart` so the current binary serves it", err)
 	}
 	return nil
 }

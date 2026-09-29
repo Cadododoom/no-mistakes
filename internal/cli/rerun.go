@@ -70,6 +70,13 @@ func newRerunCmd() *cobra.Command {
 				if err := probeDaemonOmitIntent(client); err != nil {
 					return err
 				}
+				// Same for a re-bind: the flag arrives through MethodRerun's
+				// PushBranch field, which an older daemon silently drops.
+				if strings.TrimSpace(pushBranch) != "" {
+					if err := probeDaemonPushBranch(client); err != nil {
+						return err
+					}
+				}
 				if profile != nil {
 					var resolved agentcfg.PiProfile
 					if err := client.Call(ipc.MethodResolvePiProfile, profile, &resolved); err != nil {

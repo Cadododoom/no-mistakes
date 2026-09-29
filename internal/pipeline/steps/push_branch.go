@@ -23,15 +23,13 @@ func runPushBranch(sctx *pipeline.StepContext) string {
 
 // runPublishBranch resolves the effective publish branch of a stored run.
 func runPublishBranch(run *db.Run) string {
-	if run == nil {
-		return ""
-	}
-	if run.PushBranch != nil {
-		if pushBranch := strings.TrimSpace(*run.PushBranch); pushBranch != "" {
-			return pushBranch
-		}
-	}
-	return strings.TrimPrefix(strings.TrimSpace(run.Branch), "refs/heads/")
+	return run.PublishBranch()
+}
+
+// runPushBound reports whether the run carries an explicit --push-branch
+// binding, i.e. its publish/PR-head branch can differ from its local branch.
+func runPushBound(sctx *pipeline.StepContext) bool {
+	return sctx != nil && sctx.Run != nil && sctx.Run.PushBranch != nil && strings.TrimSpace(*sctx.Run.PushBranch) != ""
 }
 
 // ValidateRunPushBranchName validates a per-run publish/PR head branch

@@ -1,11 +1,15 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/spf13/cobra"
 )
 
 func TestFormatPushBranchPushOption(t *testing.T) {
@@ -83,5 +87,81 @@ func TestRerunParams_CarriesPushBranch(t *testing.T) {
 	}
 	if params.PRBaseBranch != "develop" {
 		t.Fatalf("rerunParams.PRBaseBranch = %q, want develop", params.PRBaseBranch)
+	}
+}
+
+// TestAxiRunPushBranchRefusesOlderDaemon pins the probe contract: an older
+// daemon decodes push_branch permissively and would run unbound, publishing
+// onto the local branch, so a flagged run must be refused before launch.
+func TestAxiRunPushBranchRefusesOlderDaemon(t *testing.T) {
+	probes := []struct {
+		name  string
+		probe func() (interface{}, error)
+	}{
+		{name: "probe method unknown", probe: nil},
+		{name: "probe declined", probe: func() (interface{}, error) { return &ipc.ProbePushBranchResult{OK: false}, nil }},
+		{name: "probe undecodable", probe: func() (interface{}, error) { return json.RawMessage(`"yes"`), nil }},
+	}
+	for _, tc := range probes {
+		t.Run(tc.name, func(t *testing.T) {
+			launched := olderDaemonFixture(t, func() (interface{}, error) { return &ipc.ProbeOmitIntentResult{OK: true}, nil }, func(srv *ipc.Server) {
+				if tc.probe != nil {
+					srv.Handle(ipc.MethodProbePushBranch, func(context.Context, json.RawMessage) (interface{}, error) { return tc.probe() })
+				}
+			})
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			cmd.SetOut(&out)
+			err := runAxiRunWithLaunchProof(cmd, false, nil, "rebind the PR", "", "stacked-pr", false, "", "", defaultAxiWait)
+			if err == nil {
+				t.Fatalf("axi run --push-branch should refuse an older daemon:\n%s", out.String())
+			}
+			if !strings.Contains(out.String(), "too old to honor --push-branch") {
+				t.Fatalf("output should name the daemon capability, got:\n%s", out.String())
+			}
+			if len(*launched) != 0 {
+				t.Fatalf("run was started on a daemon that would drop the binding: %v", *launched)
+			}
+		})
+	}
+}
+
+// TestRerunPushBranchRefusesOlderDaemon mirrors the run path: the re-bind
+// rides MethodRerun's PushBranch field, which an older daemon drops.
+func TestRerunPushBranchRefusesOlderDaemon(t *testing.T) {
+	launched := olderDaemonFixture(t, func() (interface{}, error) { return &ipc.ProbeOmitIntentResult{OK: true}, nil })
+	var out bytes.Buffer
+	cmd := newRerunCmd()
+	cmd.SetArgs([]string{"--push-branch", "stacked-pr"})
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("rerun --push-branch should refuse an older daemon:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "too old to honor --push-branch") {
+		t.Fatalf("error should name the daemon capability, got: %v", err)
+	}
+	if len(*launched) != 0 {
+		t.Fatalf("rerun was started on a daemon that would drop the binding: %v", *launched)
+	}
+}
+
+// TestAxiRunPushBranchPassesCapableDaemonProbe: a daemon answering OK is
+// trusted with the binding and the refusal text never appears.
+func TestAxiRunPushBranchPassesCapableDaemonProbe(t *testing.T) {
+	olderDaemonFixture(t, func() (interface{}, error) { return &ipc.ProbeOmitIntentResult{OK: true}, nil }, func(srv *ipc.Server) {
+		srv.Handle(ipc.MethodProbePushBranch, func(context.Context, json.RawMessage) (interface{}, error) {
+			return &ipc.ProbePushBranchResult{OK: true}, nil
+		})
+	})
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&out)
+	_ = runAxiRunWithLaunchProof(cmd, false, nil, "rebind the PR", "", "stacked-pr", false, "", "", defaultAxiWait)
+	if strings.Contains(out.String(), "too old to honor --push-branch") {
+		t.Fatalf("capable daemon was refused:\n%s", out.String())
 	}
 }

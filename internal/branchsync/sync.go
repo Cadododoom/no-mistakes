@@ -1832,10 +1832,7 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	// branch the push arrived on - is what the recorded PushRef must still
 	// equal. Comparing against the caller's local branch would misclassify
 	// every deliberately bound run as target-changed.
-	expectedPushRef := "refs/heads/" + branch
-	if run.PushBranch != nil && strings.TrimSpace(*run.PushBranch) != "" {
-		expectedPushRef = "refs/heads/" + strings.TrimSpace(*run.PushBranch)
-	}
+	expectedPushRef := "refs/heads/" + run.PublishBranch()
 	if ptr(run.PushRef) != expectedPushRef || ptr(run.PushTargetFingerprint) != TargetFingerprint(s.Repo.PushURL()) || ptr(run.PushTargetKind) != targetKind(s.Repo) {
 		state.State = StateTargetChanged
 		state.Safety = "blocked_target_changed"
@@ -2059,7 +2056,7 @@ func exactPushedBinding(repo *db.Repo, run *db.Run, branch string) bool {
 		run.LastPushedSHA != nil && run.HeadSHA == ptr(run.LastPushedSHA) &&
 		run.PushTargetKind != nil && ptr(run.PushTargetKind) == targetKind(repo) &&
 		run.PushTargetFingerprint != nil && ptr(run.PushTargetFingerprint) == TargetFingerprint(repo.PushURL()) &&
-		run.PushRef != nil && ptr(run.PushRef) == "refs/heads/"+branch &&
+		run.PushRef != nil && ptr(run.PushRef) == "refs/heads/"+run.PublishBranch() &&
 		run.PushGeneration != nil
 }
 

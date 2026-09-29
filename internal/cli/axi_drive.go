@@ -278,6 +278,11 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		if _, err := steps.ValidateRunPushBranchName(pushBranch); err != nil {
 			return emitError(cmd, 2, fmt.Sprintf("--push-branch: %v", err))
 		}
+		// The binding rides claim_launch_receipt / rerun / push_received as a
+		// field an older daemon silently drops, so it must prove support first.
+		if err := probeDaemonPushBranch(env.client); err != nil {
+			return emitError(cmd, 1, err.Error())
+		}
 	}
 
 	runID := ""

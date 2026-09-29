@@ -14,6 +14,7 @@ const (
 	MethodPushReceived            = "push_received"
 	MethodResolvePiProfile        = "resolve_pi_profile"
 	MethodProbeOmitIntent         = "probe_omit_intent"
+	MethodProbePushBranch         = "probe_push_branch"
 	MethodReleaseVerificationPlan = "release_verification_plan"
 	MethodCaptureVerificationPlan = "capture_verification_plan"
 	MethodStartFreshRun           = "start_fresh_run"
@@ -148,6 +149,20 @@ type ProbeOmitIntentParams struct{}
 // is refused by such a daemon (method not found) instead of succeeding
 // silently, so a client that reaches OK=true knows omit_intent is honored.
 type ProbeOmitIntentResult struct {
+	OK bool `json:"ok"`
+}
+
+// ProbePushBranchParams is the empty request for MethodProbePushBranch.
+type ProbePushBranchParams struct{}
+
+// ProbePushBranchResult answers MethodProbePushBranch. Like the omit-intent
+// probe, the method exists only as a capability check: an older daemon
+// decodes JSON permissively and would silently drop the unknown push_branch
+// field from push_received / rerun / claim_launch_receipt, running unbound
+// and publishing onto the local branch instead of the bound target. The
+// distinct method is refused by such a daemon (method not found), so a client
+// that reaches OK=true knows push_branch is honored.
+type ProbePushBranchResult struct {
 	OK bool `json:"ok"`
 }
 

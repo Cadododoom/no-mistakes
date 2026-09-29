@@ -231,6 +231,55 @@ func TestResolveBoundPR(t *testing.T) {
 			t.Fatal("expected unreadable owned PR state to error")
 		}
 	})
+
+	boundRun := func() *db.Run {
+		return &db.Run{Branch: "refs/heads/feature", PushBranch: strptr("stacked-pr"), PRURL: strptr(owned)}
+	}
+	ownedPR := &scm.PR{Number: "2020", URL: owned, HeadBranch: "stacked-pr", BaseBranch: "main"}
+
+	t.Run("bound run keeps the owned PR whose head is the publish branch", func(t *testing.T) {
+		host := &boundPRTestHost{findPR: ownedPR, base: "main"}
+		sctx := &pipeline.StepContext{Run: boundRun()}
+		got, err := resolveBoundPR(context.Background(), sctx, host, "stacked-pr")
+		if err != nil || got == nil || got.URL != owned {
+			t.Fatalf("resolveBoundPR = %+v, %v; want owned %s", got, err, owned)
+		}
+	})
+
+	t.Run("bound run refuses an owned PR when the publish branch has another", func(t *testing.T) {
+		// `axi rerun --push-branch` re-bound the run: the persisted URL now
+		// names the previous head's review object, and taking it would update
+		// that PR while pushing to a different branch.
+		host := &boundPRTestHost{findPR: other, base: "main"}
+		sctx := &pipeline.StepContext{Run: boundRun()}
+		_, err := resolveBoundPR(context.Background(), sctx, host, "stacked-pr")
+		if err == nil {
+			t.Fatal("expected refusal when the bound publish branch has a different PR")
+		}
+		if !strings.Contains(err.Error(), "is not this run's persisted") {
+			t.Fatalf("error = %v, want a persisted-identity refusal", err)
+		}
+	})
+
+	t.Run("bound run refuses when the publish branch has no PR of its own", func(t *testing.T) {
+		host := &boundPRTestHost{base: "main"}
+		sctx := &pipeline.StepContext{Run: boundRun()}
+		_, err := resolveBoundPR(context.Background(), sctx, host, "stacked-pr")
+		if err == nil {
+			t.Fatal("expected refusal when the bound publish branch has no PR")
+		}
+		if !strings.Contains(err.Error(), "no pull request of its own") {
+			t.Fatalf("error = %v, want a missing-head refusal", err)
+		}
+	})
+
+	t.Run("bound run propagates discovery errors on an owned PR", func(t *testing.T) {
+		host := &boundPRTestHost{findErr: fmt.Errorf("forge unreachable"), base: "main"}
+		sctx := &pipeline.StepContext{Run: boundRun()}
+		if _, err := resolveBoundPR(context.Background(), sctx, host, "stacked-pr"); err == nil {
+			t.Fatal("expected the head verification failure to fail closed")
+		}
+	})
 }
 
 // openPRListTestHost is a scm.Host carrying the optional OpenPRLister
@@ -263,10 +312,10 @@ func TestRefuseAmbiguousCreateTarget(t *testing.T) {
 		}
 	})
 
-	t.Run("listing failure is best-effort", func(t *testing.T) {
+	t.Run("listing failure refuses closed", func(t *testing.T) {
 		host := &openPRListTestHost{err: fmt.Errorf("forge unreachable")}
-		if err := refuseAmbiguousCreateTarget(context.Background(), newSctx(), host, "feature", "main"); err != nil {
-			t.Fatalf("error = %v, want nil on list failure", err)
+		if err := refuseAmbiguousCreateTarget(context.Background(), newSctx(), host, "feature", "main"); err == nil {
+			t.Fatal("expected refusal when the open-PR set cannot be read")
 		}
 	})
 
@@ -317,11 +366,15 @@ func TestRefuseAmbiguousCreateTarget(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown remote head object is skipped", func(t *testing.T) {
+	t.Run("unverifiable candidate branch refuses", func(t *testing.T) {
 		missing := strings.Repeat("ab", 20)
 		host := &openPRListTestHost{prs: []scm.PR{candidate("ghost-branch", missing, "main")}}
-		if err := refuseAmbiguousCreateTarget(context.Background(), newSctx(), host, "feature", "main"); err != nil {
-			t.Fatalf("unresolvable candidate head must be skipped: %v", err)
+		err := refuseAmbiguousCreateTarget(context.Background(), newSctx(), host, "feature", "main")
+		if err == nil {
+			t.Fatal("expected refusal when an open PR's head cannot be verified")
+		}
+		if !strings.Contains(err.Error(), "could not verify") {
+			t.Fatalf("refusal must identify the unverifiable candidate, got: %v", err)
 		}
 	})
 }

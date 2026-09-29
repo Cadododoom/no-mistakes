@@ -420,9 +420,14 @@ func shortObjectID(value string) string {
 }
 
 // lastKnownBranchTip returns the commit SHA the pipeline last observed or
-// produced for this branch on the remote. It checks the current run's recorded
-// pushed head, then prior pipeline runs for the same repo and branch, and
-// finally falls back to the worktree's remote-tracking ref.
+// produced for this remote branch. It checks the current run's recorded
+// pushed head, then prior runs whose durable PushRef names this exact remote
+// ref (bound runs publish under --push-branch, not their local branch name),
+// and finally falls back to the worktree's remote-tracking ref. An earlier
+// run's publication is a valid lease anchor under the single-publisher scope:
+// the remote is only "unchanged" while it still points at what the pipeline
+// produced, and any out-of-band move falls through to the dropped-commit
+// check in resolveForcePushDecision.
 func lastKnownBranchTip(ctx context.Context, sctx *pipeline.StepContext, branch string, fork bool) string {
 	// Publication updates the durable run row after the remote and mirror settle,
 	// but the executor's in-memory run only advances HeadSHA. Reload the current
@@ -446,8 +451,9 @@ func lastKnownBranchTip(ctx context.Context, sctx *pipeline.StepContext, branch 
 	if sctx.DB != nil && sctx.Repo != nil {
 		runs, err := sctx.DB.GetRunsByRepo(sctx.Repo.ID)
 		if err == nil {
+			publishRef := "refs/heads/" + strings.TrimPrefix(branch, "refs/heads/")
 			for _, r := range runs {
-				if runPublishBranch(r) == strings.TrimPrefix(branch, "refs/heads/") && r.LastPushedSHA != nil && strings.TrimSpace(*r.LastPushedSHA) != "" {
+				if r.PushRef != nil && *r.PushRef == publishRef && r.LastPushedSHA != nil && strings.TrimSpace(*r.LastPushedSHA) != "" {
 					return strings.TrimSpace(*r.LastPushedSHA)
 				}
 			}

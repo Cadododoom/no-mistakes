@@ -121,6 +121,22 @@ func scanRun(row interface {
 	)
 }
 
+// PublishBranch resolves the remote branch this run publishes its head to:
+// the explicit per-run --push-branch binding when set, else the local branch
+// the push arrived on. Gate and mirror refs stay on Branch; this is the
+// publish/PR-head identity only.
+func (r *Run) PublishBranch() string {
+	if r == nil {
+		return ""
+	}
+	if r.PushBranch != nil {
+		if pushBranch := strings.TrimSpace(*r.PushBranch); pushBranch != "" {
+			return pushBranch
+		}
+	}
+	return strings.TrimPrefix(strings.TrimSpace(r.Branch), "refs/heads/")
+}
+
 // WorktreePath returns the recorded worktree directory of this run, or "" for
 // a run recorded before placement was durable. Callers resolve the empty case
 // through worktrees.RecordedDir rather than treating it as a path.

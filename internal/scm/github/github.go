@@ -345,7 +345,7 @@ func (h *Host) entryToPR(candidate *githubPRListEntry) *scm.PR {
 // uses it to refuse ambiguous create targets (scm.OpenPRLister).
 func (h *Host) ListOpenPRs(ctx context.Context) ([]scm.PR, error) {
 	args := append([]string{"pr", "list"}, h.repoArgs()...)
-	args = append(args, "--state", "open", "--limit", "500", "--json", "number,url,baseRefName,headRefName,headRefOid")
+	args = append(args, "--state", "open", "--limit", "500", "--json", "number,url,baseRefName,headRefName,headRefOid,headRepositoryOwner")
 	entries, err := h.listPREntries(ctx, args)
 	if err != nil {
 		return nil, err

@@ -2025,10 +2025,10 @@ func TestListOpenPRs(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr list --state open --limit 500 --json number,url,baseRefName,headRefName,headRefOid": {
+		"gh pr list --state open --limit 500 --json number,url,baseRefName,headRefName,headRefOid,headRepositoryOwner": {
 			stdout: `[` +
-				`{"number":2020,"url":"https://github.example.com/org/repo/pull/2020","baseRefName":"main","headRefName":"stacked-pr","headRefOid":"` + strings.Repeat("ab", 20) + `"},` +
-				`{"number":2025,"url":"https://github.example.com/org/repo/pull/2025","baseRefName":"main","headRefName":"feature/clone","headRefOid":"` + strings.Repeat("cd", 20) + `"}` +
+				`{"number":2020,"url":"https://github.example.com/org/repo/pull/2020","baseRefName":"main","headRefName":"stacked-pr","headRefOid":"` + strings.Repeat("ab", 20) + `","headRepositoryOwner":{"login":"org"}},` +
+				`{"number":2025,"url":"https://github.example.com/org/repo/pull/2025","baseRefName":"main","headRefName":"feature/clone","headRefOid":"` + strings.Repeat("cd", 20) + `","headRepositoryOwner":{"login":"org"}}` +
 				`]` + "\n",
 		},
 	}), nil, "", "")
