@@ -421,42 +421,47 @@ func refuseAmbiguousCreateTarget(ctx context.Context, sctx *pipeline.StepContext
 			// The recorded head usually sits behind the candidate's live tip;
 			// fetch the review object so its history is present, then re-check.
 			// Review refs on the base repo (GitHub/Gitea refs/pull, GitLab
-			// refs/merge-requests) resolve heads that live on forks, which the
-			// upstream branch cannot reach; the branch fetch covers same-repo
-			// listings on providers without review refs. When every fetch
-			// fails the candidate stays unverified and the create refuses
-			// rather than opening a possibly duplicate pull request.
+			// refs/merge-requests) name the PR's own head for same-repo and
+			// cross-fork listings alike, so both the recorded head and the
+			// fetched live tip count as ancestry evidence. The upstream branch
+			// fallback is not attested to the listed PR - a same-named branch
+			// on the base repo can belong to an unrelated fork PR - so it only
+			// materializes the recorded head, never a tip of its own. When no
+			// fetch can verify the candidate the create refuses rather than
+			// opening a possibly duplicate pull request.
 			upstreamURL := resolveUpstreamURL(sctx)
-			scanRef := "refs/no-mistakes/open-pr-scan/" + candidateBranch
-			fetched := false
+			reviewRefFetched := false
+			reviewRefTip := ""
 			var lastErr error
 			if candidate.Number != "" {
-				scanRef = "refs/no-mistakes/open-pr-scan/pr-" + candidate.Number
+				scanRef := "refs/no-mistakes/open-pr-scan/pr-" + candidate.Number
 				for _, remoteRef := range []string{"refs/pull/" + candidate.Number + "/head", "refs/merge-requests/" + candidate.Number + "/head"} {
 					if err := git.FetchRemoteRefToPrivateRef(ctx, sctx.WorkDir, upstreamURL, remoteRef, scanRef); err == nil {
-						fetched = true
+						reviewRefFetched = true
+						if tip, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", scanRef+"^{commit}"); err == nil {
+							reviewRefTip = strings.TrimSpace(tip)
+						}
 						break
 					} else {
 						lastErr = err
 					}
 				}
 			}
-			if !fetched {
-				scanRef = "refs/no-mistakes/open-pr-scan/" + candidateBranch
-				if err := git.FetchRemoteBranchToPrivateRef(ctx, sctx.WorkDir, upstreamURL, candidateBranch, scanRef); err != nil {
+			if !reviewRefFetched {
+				if err := git.FetchRemoteBranchToPrivateRef(ctx, sctx.WorkDir, upstreamURL, candidateBranch, "refs/no-mistakes/open-pr-scan/"+candidateBranch); err != nil {
 					if lastErr != nil {
 						return fmt.Errorf("could not verify open pull request %s before PR create: %w (review ref: %v)", describePR(candidate), err, lastErr)
 					}
 					return fmt.Errorf("could not verify open pull request %s before PR create: %w", describePR(candidate), err)
 				}
+				// A successful branch fetch can still be about a different PR
+				// (a same-named upstream branch when the listing's head lives
+				// on a fork), so the recorded head must now resolve locally.
+				if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", candidateHead+"^{commit}"); err != nil {
+					return fmt.Errorf("could not verify open pull request %s before PR create: recorded head %s is not reachable on the review ref or the upstream branch", describePR(candidate), shortObjectID(candidateHead))
+				}
 			}
-			// The live tip of the fetched review ref can sit ahead of the
-			// recorded head (or replace it after a force-push), so check both.
-			fetchedCandidateTip := ""
-			if tip, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", scanRef+"^{commit}"); err == nil {
-				fetchedCandidateTip = strings.TrimSpace(tip)
-			}
-			if !isAncestor(ctx, sctx.WorkDir, candidateHead, head) && !isAncestor(ctx, sctx.WorkDir, fetchedCandidateTip, head) {
+			if !isAncestor(ctx, sctx.WorkDir, candidateHead, head) && !(reviewRefTip != "" && isAncestor(ctx, sctx.WorkDir, reviewRefTip, head)) {
 				continue
 			}
 		}

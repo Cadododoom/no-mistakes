@@ -403,6 +403,27 @@ func TestRefuseAmbiguousCreateTarget(t *testing.T) {
 		}
 	})
 
+	t.Run("same-named upstream branch does not attest a fork PR", func(t *testing.T) {
+		// A fork PR's head can share a name with an upstream branch it has no
+		// relation to. The fallback fetch must never read that branch's tip as
+		// the PR's live head - the refusal is a verification failure, not a
+		// duplicate claim.
+		gitCmd(t, dir, "branch", "-f", "upstream-lookalike", baseSHA)
+		host := &openPRListTestHost{prs: []scm.PR{
+			{Number: "7777", URL: "https://github.com/test/repo/pull/7777", HeadBranch: "upstream-lookalike", HeadSHA: strings.Repeat("ee", 20), BaseBranch: "main"},
+		}}
+		err := refuseAmbiguousCreateTarget(context.Background(), newSctx(), host, "feature", "main")
+		if err == nil {
+			t.Fatal("expected a verification refusal for an unverifiable recorded head")
+		}
+		if strings.Contains(err.Error(), "refusing to create pull request") {
+			t.Fatalf("an unrelated upstream branch must not pose as the PR's live head: %v", err)
+		}
+		if !strings.Contains(err.Error(), "could not verify") {
+			t.Fatalf("error = %v, want a verification refusal", err)
+		}
+	})
+
 	t.Run("unverifiable candidate branch refuses", func(t *testing.T) {
 		missing := strings.Repeat("ab", 20)
 		host := &openPRListTestHost{prs: []scm.PR{candidate("ghost-branch", missing, "main")}}
