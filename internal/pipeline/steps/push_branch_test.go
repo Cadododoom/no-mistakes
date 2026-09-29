@@ -366,6 +366,43 @@ func TestRefuseAmbiguousCreateTarget(t *testing.T) {
 		}
 	})
 
+	t.Run("fork-only PR head resolves through the review ref", func(t *testing.T) {
+		// A PR whose head lives only on a fork has no upstream branch; the
+		// check verifies it through refs/pull/<n>/head on the base repo.
+		gitCmd(t, dir, "checkout", "-b", "fork-line", baseSHA)
+		if err := os.WriteFile(filepath.Join(dir, "fork.txt"), []byte("fork\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, dir, "add", "-A")
+		gitCmd(t, dir, "commit", "-m", "fork line commit")
+		forkHead := gitCmd(t, dir, "rev-parse", "HEAD")
+		gitCmd(t, dir, "checkout", "feature")
+		gitCmd(t, dir, "update-ref", "refs/pull/4242/head", forkHead)
+
+		host := &openPRListTestHost{prs: []scm.PR{
+			{Number: "4242", URL: "https://github.com/test/repo/pull/4242", HeadBranch: "someone:only-branch", HeadSHA: forkHead, BaseBranch: "main"},
+		}}
+		if err := refuseAmbiguousCreateTarget(context.Background(), newSctx(), host, "feature", "main"); err != nil {
+			t.Fatalf("verified non-ancestor fork PR must not block create: %v", err)
+		}
+	})
+
+	t.Run("fork duplicate detected through the review ref live tip", func(t *testing.T) {
+		// The recorded head is stale or unverifiable, but the live review-ref
+		// tip is contained in the proposed head: still a duplicate.
+		gitCmd(t, dir, "update-ref", "refs/pull/5555/head", baseSHA)
+		host := &openPRListTestHost{prs: []scm.PR{
+			{Number: "5555", URL: "https://github.com/test/repo/pull/5555", HeadBranch: "someone:stacked-pr", HeadSHA: strings.Repeat("ff", 20), BaseBranch: "main"},
+		}}
+		err := refuseAmbiguousCreateTarget(context.Background(), newSctx(), host, "feature", "main")
+		if err == nil {
+			t.Fatal("expected refusal when the review ref tip is contained in the proposed head")
+		}
+		if !strings.Contains(err.Error(), "refusing to create pull request") {
+			t.Fatalf("error = %v, want a duplicate refusal", err)
+		}
+	})
+
 	t.Run("unverifiable candidate branch refuses", func(t *testing.T) {
 		missing := strings.Repeat("ab", 20)
 		host := &openPRListTestHost{prs: []scm.PR{candidate("ghost-branch", missing, "main")}}
