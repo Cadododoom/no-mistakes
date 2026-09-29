@@ -1572,10 +1572,12 @@ func TestReviewStep_PushedIgnorePatternsCannotSuppressPathInstructions(t *testin
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			// The branch adds app.go and ignores *.txt, so the reviewable set
-			// is app.go alone; the canned clean review covers it in one turn.
+			// The branch adds app.go and ignores *.txt, but the trusted rule
+			// keeps feature.txt reviewable: a pushed ignore cannot waive a
+			// maintainer's rule, so the reviewable set is both files and the
+			// canned clean review covers them in one turn.
 			findings := cleanReviewFindings()
-			findings.ReviewedPaths = []string{"app.go"}
+			findings.ReviewedPaths = []string{"app.go", "feature.txt"}
 			j, _ := json.Marshal(findings)
 			return &agent.Result{Output: j}, nil
 		},
@@ -1598,6 +1600,79 @@ func TestReviewStep_PushedIgnorePatternsCannotSuppressPathInstructions(t *testin
 	}
 	if !strings.Contains(ag.calls[0].Prompt, "Fixture files carry no product behavior.") {
 		t.Fatalf("a pushed ignore_patterns entry suppressed the trusted rule:\n%s", ag.calls[0].Prompt)
+	}
+}
+
+// The all-ignored early return used to approve the head before trusted
+// instruction selection ever ran, so ignore_patterns ['*'] on the pushed
+// branch produced a Review pass with the matching trusted rule never run
+// (#1069). Files a matched trusted rule covers stay reviewable even when the
+// pushed branch ignores them, which keeps the reviewer running; a branch
+// whose ignored files no trusted rule covers is still the authorized skip
+// the early return exists for.
+func TestReviewStep_AllIgnoredCannotSuppressTrustedReview(t *testing.T) {
+	t.Parallel()
+
+	rules := []config.PathInstruction{{Path: "*.txt", Instructions: "Review every fixture modification."}}
+	for _, tc := range []struct {
+		name      string
+		rules     []config.PathInstruction
+		wantCalls int
+	}{
+		{"trusted_rule_matches", rules, 1},
+		{"no_rules", nil, 0},
+		{"rule_matches_nothing", []config.PathInstruction{{Path: "internal/**", Instructions: "SCM rules."}}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			// The branch changes feature.txt and commits its own pushed
+			// .no-mistakes.yaml carrying ignore_patterns ['*'] - the config
+			// file itself rides the same diff the issue's proof uses.
+			if err := os.WriteFile(filepath.Join(dir, ".no-mistakes.yaml"), []byte("ignore_patterns:\n  - '*'\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", "-A")
+			gitCmd(t, dir, "commit", "-m", "add pushed ignore-everything config")
+
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					return nil, fmt.Errorf("synthetic reviewer refusal")
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+			sctx.Config.IgnorePatterns = []string{"*"}
+			sctx.Config.Review = config.Review{PathInstructions: tc.rules}
+
+			outcome, err := (&ReviewStep{}).Execute(sctx)
+			if len(ag.calls) != tc.wantCalls {
+				t.Fatalf("reviewer calls = %d, want %d", len(ag.calls), tc.wantCalls)
+			}
+			if tc.wantCalls > 0 {
+				// The trusted rule's file stayed reviewable, so the refusing
+				// reviewer is invoked and the step fails instead of approving.
+				if err == nil {
+					t.Fatal("expected the refusing reviewer's error, got nil")
+				}
+				if outcome != nil && outcome.ReviewApprovedHeadSHA == sctx.Run.HeadSHA {
+					t.Fatal("an ignored-out review still approved the head")
+				}
+				if !strings.Contains(ag.calls[0].Prompt, "feature.txt") {
+					t.Errorf("review prompt does not hold coverage to the trusted rule's file:\n%s", ag.calls[0].Prompt)
+				}
+				return
+			}
+			// Nothing is reviewable and no trusted rule claims the files: the
+			// authorized skip approves without invoking the reviewer.
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome == nil || outcome.ReviewApprovedHeadSHA != sctx.Run.HeadSHA {
+				t.Fatalf("authorized skip outcome = %+v, want approval of current head", outcome)
+			}
+		})
 	}
 }
 

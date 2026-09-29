@@ -556,7 +556,7 @@ Do not rely on a configured command to leave a background server or watcher runn
 
 ### ignore_patterns
 
-Paths to exclude from review and documentation checks.
+Paths to exclude from review and documentation checks. `ignore_patterns` is read from the pushed branch, so it cannot waive a trusted rule: a path a matched [`review.path_instructions`](#reviewpath_instructions) entry covers stays reviewable and appears in the coverage contract even when an ignore pattern excludes it.
 
 | | |
 | --- | --- |

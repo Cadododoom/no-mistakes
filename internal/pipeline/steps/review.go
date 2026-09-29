@@ -193,10 +193,14 @@ Previous review findings to address:
 	}
 	reviewTargetSHA := sctx.Run.HeadSHA
 
-	// The changed-file set is read once and viewed two ways on purpose: the
-	// ignore-filtered subset decides whether there is anything to review, while
-	// trusted path instructions are selected against the complete set (see
-	// matchPathInstructions).
+	// The changed-file set is read once and viewed two ways on purpose: trusted
+	// path instructions are selected against the complete set (see
+	// matchPathInstructions), and the reviewable set is the ignore-filtered
+	// subset plus every file a matched trusted rule covers. A path covered by
+	// a maintainer's rule is reviewable even when the pushed branch's
+	// ignore_patterns excludes it - the pushed field cannot waive the trusted
+	// rule, so an `*` ignore cannot leave this set empty and approve the head
+	// with the rule never run.
 	var args []string
 	if sctx.Fixing {
 		args = []string{"diff", "--name-only", "-z", "--no-renames", baseSHA}
@@ -209,7 +213,25 @@ Previous review findings to address:
 	}
 	changed := changedPathList(changedFiles)
 
+	pathInstructionMatches := matchPathInstructions(changed, sctx.Config.Review.PathInstructions)
 	reviewable := reviewablePaths(changed, sctx.Config.IgnorePatterns)
+	if len(pathInstructionMatches.Blocks) > 0 {
+		keep := make(map[string]bool, len(changed))
+		for _, file := range reviewable {
+			keep[file] = true
+		}
+		for _, block := range pathInstructionMatches.Blocks {
+			for _, file := range block.Files {
+				keep[file] = true
+			}
+		}
+		reviewable = make([]string, 0, len(changed))
+		for _, file := range changed {
+			if keep[file] {
+				reviewable = append(reviewable, file)
+			}
+		}
+	}
 	if len(reviewable) == 0 {
 		sctx.Log("no changes to review")
 		noChangeFindings := Findings{
@@ -259,11 +281,11 @@ Previous review findings to address:
 	// default-branch config copy (regardless of allow_repo_commands) so a pushed
 	// branch cannot steer the reviewer that gates it. Selection runs against the
 	// complete changed-file set, never the ignore-filtered one, so a pushed
-	// ignore_patterns entry cannot suppress a trusted rule. Only blocks whose
-	// glob matches a changed path are appended, so a repository with none
-	// configured - or none relevant to this diff - gets the prompt above
-	// unchanged.
-	pathInstructionMatches := matchPathInstructions(changed, sctx.Config.Review.PathInstructions)
+	// ignore_patterns entry cannot suppress a trusted rule - it was computed
+	// above, before the all-ignored early return, for exactly that reason.
+	// Only blocks whose glob matches a changed path are appended, so a
+	// repository with none configured - or none relevant to this diff - gets
+	// the prompt above unchanged.
 	logPathInstructions(sctx.Log, pathInstructionMatches)
 	pathInstructions := reviewPathInstructionsSection(pathInstructionMatches)
 
@@ -585,7 +607,7 @@ func coveragePathLine(p string) string {
 // file the reviewer did not examine still must not be listed.
 func reviewCoverageSection(paths []string) string {
 	var b strings.Builder
-	b.WriteString("\nChanged files this review is held to (computed by the pipeline from the branch diff, minus ignored paths):\n")
+	b.WriteString("\nChanged files this review is held to (computed by the pipeline from the branch diff, minus ignored paths, plus every path a trusted review instruction covers):\n")
 	for _, p := range paths {
 		fmt.Fprintf(&b, "- %s\n", coveragePathLine(p))
 	}
