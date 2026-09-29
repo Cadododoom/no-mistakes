@@ -200,7 +200,9 @@ Previous review findings to address:
 	// a maintainer's rule is reviewable even when the pushed branch's
 	// ignore_patterns excludes it - the pushed field cannot waive the trusted
 	// rule, so an `*` ignore cannot leave this set empty and approve the head
-	// with the rule never run.
+	// with the rule never run. The default branch's own ignore_patterns stays
+	// an authorized skip even then: a path the trusted ignore list also
+	// excludes does not join the union, so only PUSHED ignores are overruled.
 	var args []string
 	if sctx.Fixing {
 		args = []string{"diff", "--name-only", "-z", "--no-renames", baseSHA}
@@ -222,7 +224,9 @@ Previous review findings to address:
 		}
 		for _, block := range pathInstructionMatches.Blocks {
 			for _, file := range block.Files {
-				keep[file] = true
+				if !ignoredByPatterns(file, sctx.Config.TrustedIgnorePatterns) {
+					keep[file] = true
+				}
 			}
 		}
 		reviewable = make([]string, 0, len(changed))
@@ -607,7 +611,7 @@ func coveragePathLine(p string) string {
 // file the reviewer did not examine still must not be listed.
 func reviewCoverageSection(paths []string) string {
 	var b strings.Builder
-	b.WriteString("\nChanged files this review is held to (computed by the pipeline from the branch diff, minus ignored paths, plus every path a trusted review instruction covers):\n")
+	b.WriteString("\nChanged files this review is held to (computed by the pipeline from the branch diff, minus ignored paths, plus every path a trusted review instruction covers that the default branch's own ignores do not also exclude):\n")
 	for _, p := range paths {
 		fmt.Fprintf(&b, "- %s\n", coveragePathLine(p))
 	}

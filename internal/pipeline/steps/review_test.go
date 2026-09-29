@@ -1607,21 +1607,30 @@ func TestReviewStep_PushedIgnorePatternsCannotSuppressPathInstructions(t *testin
 // instruction selection ever ran, so ignore_patterns ['*'] on the pushed
 // branch produced a Review pass with the matching trusted rule never run
 // (#1069). Files a matched trusted rule covers stay reviewable even when the
-// pushed branch ignores them, which keeps the reviewer running; a branch
-// whose ignored files no trusted rule covers is still the authorized skip
-// the early return exists for.
+// pushed branch ignores them, which keeps the reviewer running - unless the
+// default branch's own ignore_patterns also excludes them, which stays the
+// authorized skip the early return exists for: only PUSHED ignores are
+// overruled by the union.
 func TestReviewStep_AllIgnoredCannotSuppressTrustedReview(t *testing.T) {
 	t.Parallel()
 
 	rules := []config.PathInstruction{{Path: "*.txt", Instructions: "Review every fixture modification."}}
 	for _, tc := range []struct {
-		name      string
-		rules     []config.PathInstruction
-		wantCalls int
+		name           string
+		rules          []config.PathInstruction
+		trustedIgnores []string
+		wantCalls      int
 	}{
-		{"trusted_rule_matches", rules, 1},
-		{"no_rules", nil, 0},
-		{"rule_matches_nothing", []config.PathInstruction{{Path: "internal/**", Instructions: "SCM rules."}}, 0},
+		{"trusted_rule_matches", rules, nil, 1},
+		{"no_rules", nil, nil, 0},
+		{"rule_matches_nothing", []config.PathInstruction{{Path: "internal/**", Instructions: "SCM rules."}}, nil, 0},
+		// @coreldh's interaction: the default branch's own ignore_patterns is
+		// an authorized skip even for paths a trusted rule covers - only
+		// PUSHED ignores are overruled by the union.
+		{"trusted_ignore_still_skips", rules, []string{"*.txt"}, 0},
+		// ...while a pushed-only ignore that the trusted list does not share
+		// still cannot waive the maintainer's rule.
+		{"pushed_only_ignore_loses_to_rule", rules, []string{"vendor/**"}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1644,6 +1653,7 @@ func TestReviewStep_AllIgnoredCannotSuppressTrustedReview(t *testing.T) {
 			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 			sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
 			sctx.Config.IgnorePatterns = []string{"*"}
+			sctx.Config.TrustedIgnorePatterns = tc.trustedIgnores
 			sctx.Config.Review = config.Review{PathInstructions: tc.rules}
 
 			outcome, err := (&ReviewStep{}).Execute(sctx)
