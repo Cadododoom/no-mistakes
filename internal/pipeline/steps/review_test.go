@@ -1686,6 +1686,87 @@ func TestReviewStep_AllIgnoredCannotSuppressTrustedReview(t *testing.T) {
 	}
 }
 
+// A rule's displayed file list must agree with the held-to coverage list:
+// showing a file the trusted branch's own ignore_patterns also excludes
+// invites the reviewer to report it in reviewed_paths, which then parks the
+// round on out-of-scope coverage. Blocks keep only their still-reviewable
+// matched files, a block left with none is dropped from the prompt, and the
+// step log names it as matching only ignored paths rather than looking
+// identical to a rule that matched nothing.
+func TestReviewStep_TrustedIgnoredFilesAreNotClaimedByRuleBlocks(t *testing.T) {
+	t.Parallel()
+
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	// The branch adds files both config copies ignore: keep.go survives
+	// (covered by *.go), vendor/x.go and pkg/dropped.go are ignored by
+	// pushed AND trusted lists, and a vendor-only rule matches nothing
+	// reviewable at all.
+	for name, content := range map[string]string{
+		".no-mistakes.yaml": "ignore_patterns:\n  - 'vendor/**'\n  - 'pkg/**'\n",
+		"keep.go":           "package main\n",
+		"vendor/x.go":       "package vendor\n",
+		"pkg/dropped.go":    "package pkg\n",
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "add ignored go files")
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return nil, fmt.Errorf("synthetic reviewer refusal")
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+	sctx.Config.IgnorePatterns = []string{"vendor/**", "pkg/**"}
+	sctx.Config.TrustedIgnorePatterns = []string{"vendor/**", "pkg/**"}
+	sctx.Config.Review = config.Review{PathInstructions: []config.PathInstruction{
+		{Path: "*.txt", Instructions: "Review every fixture modification."},
+		{Path: "*.go", Instructions: "Review every Go file."},
+		{Path: "vendor/**", Instructions: "Vendor-only review rules."},
+	}}
+	var logs []string
+	sctx.Log = func(msg string) { logs = append(logs, msg) }
+
+	if _, err := (&ReviewStep{}).Execute(sctx); err == nil {
+		t.Fatal("expected the refusing reviewer's error, got nil")
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("reviewer calls = %d, want 1", len(ag.calls))
+	}
+	prompt := ag.calls[0].Prompt
+	// Survivors and their still-covered rules stay in the prompt.
+	for _, want := range []string{"feature.txt", "keep.go", "Review every Go file.", "Review every fixture modification."} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("review prompt missing %q", want)
+		}
+	}
+	// Trusted-ignored files and the fully-ignored vendor rule's instructions
+	// must not be claimed anywhere in the prompt.
+	for _, excluded := range []string{"vendor/x.go", "pkg/dropped.go", "Vendor-only review rules."} {
+		if strings.Contains(prompt, excluded) {
+			t.Errorf("review prompt claims skipped content %q", excluded)
+		}
+	}
+	foundIgnoredLog := false
+	for _, msg := range logs {
+		if strings.Contains(msg, "matched only paths the default branch ignores") && strings.Contains(msg, "vendor/**") {
+			foundIgnoredLog = true
+		}
+	}
+	if !foundIgnoredLog {
+		t.Errorf("step log does not name the vendor-only rule as ignored-out:\n%s", strings.Join(logs, "\n"))
+	}
+}
+
 func hasAskUserFindings(t *testing.T, raw string) bool {
 	t.Helper()
 	findings, err := types.ParseFindingsJSON(raw)

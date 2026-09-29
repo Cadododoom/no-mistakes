@@ -215,18 +215,23 @@ Previous review findings to address:
 	}
 	changed := changedPathList(changedFiles)
 
-	pathInstructionMatches := matchPathInstructions(changed, sctx.Config.Review.PathInstructions)
+	// The scoped view subtracts paths the default branch's own ignore list
+	// also excludes: they never join the reviewable set and the prompt must
+	// not show them under a rule, so the union, the injected section, and
+	// the log all consume one filtered view of the matched blocks.
+	scopedMatches := scopePathInstructionMatches(
+		matchPathInstructions(changed, sctx.Config.Review.PathInstructions),
+		sctx.Config.TrustedIgnorePatterns,
+	)
 	reviewable := reviewablePaths(changed, sctx.Config.IgnorePatterns)
-	if len(pathInstructionMatches.Blocks) > 0 {
+	if len(scopedMatches.Blocks) > 0 {
 		keep := make(map[string]bool, len(changed))
 		for _, file := range reviewable {
 			keep[file] = true
 		}
-		for _, block := range pathInstructionMatches.Blocks {
+		for _, block := range scopedMatches.Blocks {
 			for _, file := range block.Files {
-				if !ignoredByPatterns(file, sctx.Config.TrustedIgnorePatterns) {
-					keep[file] = true
-				}
+				keep[file] = true
 			}
 		}
 		reviewable = make([]string, 0, len(changed))
@@ -290,8 +295,8 @@ Previous review findings to address:
 	// Only blocks whose glob matches a changed path are appended, so a
 	// repository with none configured - or none relevant to this diff - gets
 	// the prompt above unchanged.
-	logPathInstructions(sctx.Log, pathInstructionMatches)
-	pathInstructions := reviewPathInstructionsSection(pathInstructionMatches)
+	logPathInstructions(sctx.Log, scopedMatches)
+	pathInstructions := reviewPathInstructionsSection(scopedMatches)
 
 	// The authorization/privacy obligation below specializes the existing
 	// concrete-state trace only when changed behavior crosses a potentially

@@ -20,9 +20,13 @@ type pathInstructionBlock struct {
 // pathInstructionMatches is the outcome of selecting trusted rules for a run.
 // The non-matching and dropped sets exist so the step can say which rules it
 // applied and which it did not; a rule that matched nothing and a rule that was
-// discarded must not look the same in the log.
+// discarded must not look the same in the log. IgnoredIDs names the blocks
+// every matched file of which the trusted branch's own ignore_patterns also
+// excludes: their glob fired, but the maintainer's own ignores keep those
+// files skipped, so the prompt must not claim them.
 type pathInstructionMatches struct {
 	Blocks       []pathInstructionBlock
+	IgnoredIDs   []string
 	UnmatchedIDs []string
 	DuplicateIDs []string
 	UnusableIDs  []string
@@ -91,6 +95,41 @@ func matchingChangedPaths(changed []string, pattern string) []string {
 		}
 	}
 	return files
+}
+
+// scopePathInstructionMatches narrows the selected blocks to what the run's
+// coverage contract will claim: a file the trusted default branch's own
+// ignore_patterns also excludes stays skipped, so the prompt must not list it
+// under the rule - a reviewer that reports it in reviewed_paths would park
+// the round on out-of-scope coverage. A block left with no files is dropped
+// from the prompt entirely (its glob matched, but every file it claimed is
+// skipped) and reported through IgnoredIDs so it does not read as an
+// unmatched rule. The returned value shares every untouched field with the
+// input, so it is the single view the union, the prompt, and the log consume.
+func scopePathInstructionMatches(matches pathInstructionMatches, trustedIgnorePatterns []string) pathInstructionMatches {
+	if len(trustedIgnorePatterns) == 0 {
+		return matches
+	}
+	out := matches
+	out.Blocks = nil
+	for _, block := range matches.Blocks {
+		files := make([]string, 0, len(block.Files))
+		for _, file := range block.Files {
+			if !ignoredByPatterns(file, trustedIgnorePatterns) {
+				files = append(files, file)
+			}
+		}
+		if len(files) == 0 {
+			out.IgnoredIDs = append(out.IgnoredIDs, block.Path)
+			continue
+		}
+		out.Blocks = append(out.Blocks, pathInstructionBlock{
+			Path:         block.Path,
+			Instructions: block.Instructions,
+			Files:        files,
+		})
+	}
+	return out
 }
 
 // matchedFilesSummary renders one block's file list, bounded by
@@ -174,6 +213,9 @@ func logPathInstructions(log func(string), matches pathInstructionMatches) {
 	}
 	if len(matches.UnmatchedIDs) > 0 {
 		log(fmt.Sprintf("%d trusted review instruction rule(s) matched no changed path: %s", len(matches.UnmatchedIDs), strings.Join(matches.UnmatchedIDs, ", ")))
+	}
+	if len(matches.IgnoredIDs) > 0 {
+		log(fmt.Sprintf("%d trusted review instruction rule(s) matched only paths the default branch ignores: %s", len(matches.IgnoredIDs), strings.Join(matches.IgnoredIDs, ", ")))
 	}
 	if len(matches.DuplicateIDs) > 0 {
 		log(fmt.Sprintf("skipped %d duplicate trusted review instruction rule(s): %s", len(matches.DuplicateIDs), strings.Join(matches.DuplicateIDs, ", ")))
