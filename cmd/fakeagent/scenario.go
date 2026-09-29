@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -276,9 +277,49 @@ func heldToPaths(prompt string) ([]string, bool) {
 		if !strings.HasPrefix(line, "- ") {
 			break
 		}
-		paths = append(paths, strings.TrimPrefix(line, "- "))
+		paths = append(paths, unescapeCoveragePath(strings.TrimPrefix(line, "- ")))
 	}
 	return paths, true
+}
+
+// unescapeCoveragePath reverses the display escaping the pipeline applies to
+// held-to paths (coveragePathLine): control characters reach the prompt as
+// visible `\n`, `\r`, `\t`, and `\uXXXX` sequences so an authored path can
+// never inject extra lines, and reviewed_paths must carry the real path back.
+func unescapeCoveragePath(s string) string {
+	if !strings.ContainsRune(s, '\\') {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		switch s[i+1] {
+		case 'n':
+			b.WriteByte('\n')
+			i++
+		case 'r':
+			b.WriteByte('\r')
+			i++
+		case 't':
+			b.WriteByte('\t')
+			i++
+		case 'u':
+			if i+6 <= len(s) {
+				if v, err := strconv.ParseUint(s[i+2:i+6], 16, 32); err == nil {
+					b.WriteRune(rune(v))
+					i += 5
+					continue
+				}
+			}
+			b.WriteByte(s[i])
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
 }
 
 // promptContextValue reads a `- <key>: <value>` line from the prompt's
