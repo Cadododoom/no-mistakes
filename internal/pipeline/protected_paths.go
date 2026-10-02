@@ -27,7 +27,31 @@ func HasProtectedPathRefusal(findingsJSON string) bool {
 // holds work no Test turn validated. Approve is refused there because the
 // steps after Test would commit and publish that work; fix validates it.
 func HasUnvalidatedWorkRefusal(findingsJSON string) bool {
-	return hasFindingID(findingsJSON, types.FindingIDTestAgentUnvalidatedWork)
+	return hasFindingID(findingsJSON, types.FindingIDTestAgentUnvalidatedWork) ||
+		hasFindingID(findingsJSON, types.FindingIDReviewAgentUnvalidatedWork)
+}
+
+// HasIncompleteAgentInvocationRefusal identifies a gate whose Review/Test
+// agent invocation ended before it could certify the current head.
+func HasIncompleteAgentInvocationRefusal(findingsJSON string) bool {
+	return hasFindingID(findingsJSON, types.FindingIDReviewAgentIncomplete) ||
+		hasFindingID(findingsJSON, types.FindingIDTestAgentIncomplete)
+}
+
+// HasMCPAuthorizationRefusal reports a parked authorization handoff. Automatic
+// resolvers must leave it for a human, who can authorize the exact executor
+// context before retrying the stage.
+func HasMCPAuthorizationRefusal(findingsJSON string) bool {
+	findings, err := types.ParseFindingsJSON(findingsJSON)
+	if err != nil {
+		return false
+	}
+	for _, finding := range findings.Items {
+		if finding.Category == types.FindingCategoryMCPAuthorization || finding.AuthorizationRequired != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func hasFindingID(findingsJSON, id string) bool {
@@ -94,7 +118,21 @@ func approvalRefusal(step types.StepName, findingsJSON string) string {
 	case HasProtectedPathRefusal(findingsJSON):
 		return fmt.Sprintf("cannot approve a protected-path refusal: resolve the reported edit, then use fix to retry %s; approval would skip unfinished work", step)
 	case HasUnvalidatedWorkRefusal(findingsJSON):
-		return fmt.Sprintf("cannot approve %s: the run worktree holds work no Test turn validated and approval would publish it; inspect it as the findings describe, then use fix to validate it, or abort", step)
+		return fmt.Sprintf("cannot approve %s: the run worktree holds work no Review or Test turn validated and approval would publish it; inspect it as the findings describe, then use fix to validate it, or abort", step)
+	case HasIncompleteAgentInvocationRefusal(findingsJSON):
+		return fmt.Sprintf("cannot approve %s: its Review/Test agent invocation did not finish validation; use fix to retry the stage or abort", step)
+	case HasMCPAuthorizationRefusal(findingsJSON):
+		return "cannot approve: a required MCP server is not authorized in the daemon executor context; use fix after authorizing it or abort"
+	}
+	return ""
+}
+
+func skipRefusal(step types.StepName, findingsJSON string) string {
+	if HasMCPAuthorizationRefusal(findingsJSON) {
+		return "cannot skip: a required MCP server is not authorized in the daemon executor context; use fix after authorizing it or abort"
+	}
+	if HasIncompleteAgentInvocationRefusal(findingsJSON) || HasUnvalidatedWorkRefusal(findingsJSON) {
+		return fmt.Sprintf("cannot skip %s: its Review/Test agent invocation did not finish validation; use fix to retry the stage or abort", step)
 	}
 	return ""
 }

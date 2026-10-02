@@ -348,21 +348,22 @@ func TestReviewFixerSession_FreshFallbackTimeoutExcludesResumeActivity(t *testin
 	}
 	sctx.Sessions = pipeline.NewRunSessions(sctx.DB, sctx.Run.ID, ag, true)
 
-	_, err := (&ReviewStep{}).Execute(sctx)
-	if err == nil {
-		t.Fatal("expected the fresh fixer session to time out")
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("expected the fresh fixer session to park for timeout recovery: %+v, %v", outcome, err)
 	}
+	diagnostic := outcome.Findings
 	if ag.calls != 2 {
 		t.Fatalf("agent calls = %d, want failed resume and fresh fallback", ag.calls)
 	}
-	if !strings.Contains(err.Error(), "produced no output at all") {
-		t.Fatalf("error = %q, want fresh fallback silence", err)
+	if !strings.Contains(diagnostic, "produced no output at all") {
+		t.Fatalf("error = %q, want fresh fallback silence", diagnostic)
 	}
-	if strings.Contains(err.Error(), "last produced output") {
-		t.Fatalf("error = %q, dead resume activity must not describe the fresh fallback", err)
+	if strings.Contains(diagnostic, "last produced output") {
+		t.Fatalf("error = %q, dead resume activity must not describe the fresh fallback", diagnostic)
 	}
-	if !strings.Contains(err.Error(), "pid=7272") {
-		t.Fatalf("error = %q, want silence attributed to the fresh fixer subprocess", err)
+	if !strings.Contains(diagnostic, "pid=7272") {
+		t.Fatalf("error = %q, want silence attributed to the fresh fixer subprocess", diagnostic)
 	}
 }
 

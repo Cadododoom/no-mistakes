@@ -123,6 +123,7 @@ func newAxiRunCmd() *cobra.Command {
 	var validationGeneration string
 	var baseBranch string
 	var noPublishIntent bool
+	var requiredMCPValues []string
 	var model, effort string
 	var wait time.Duration
 
@@ -134,7 +135,7 @@ func newAxiRunCmd() *cobra.Command {
 			"prints it. With --yes it auto-resolves eligible gates (fixing actionable\n" +
 			"findings - including ask-user findings, with no escalation - then\n" +
 			"accepting the result) until a decision point or outcome.\n" +
-			"Protected-path and Test unvalidated-work refusals require an explicit\n" +
+			"Protected-path, incomplete-agent, unvalidated-work and required MCP authorization refusals require an explicit\n" +
 			"response, even with --yes.\n\n" +
 			"Starting a new run requires --intent TEXT, --intent-file PATH, or --intent -\n" +
 			"(read stdin to EOF). Pass what the user set out to accomplish, not a\n" +
@@ -168,6 +169,10 @@ func newAxiRunCmd() *cobra.Command {
 			"Pi-only agents; raw native selection flags conflict. The pin outranks\n" +
 			"review-role profiles and survives config edits, retries and recovery.\n" +
 			"Omit flags to reattach; a different selection cannot change an active run.\n\n" +
+			"--require-mcp STAGE:SERVER declares a Codex MCP dependency for that stage,\n" +
+			"currently review:cloudflare or test:cloudflare. The daemon checks OAuth\n" +
+			"in its own Codex context before starting that stage. Omit it when the task\n" +
+			"does not need the MCP server; listing a configured server is not a requirement.\n\n" +
 			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
 			"agent. The daemon requires a supported native agent binary, the `agent: cursor`\n" +
 			"or `agent: devin` ACP alias, or an explicit `acp:<target>` through `acpx`, and\n" +
@@ -186,6 +191,7 @@ func newAxiRunCmd() *cobra.Command {
 				"has_intent":        strings.TrimSpace(resolvedIntent) != "",
 				"has_skip":          strings.TrimSpace(skipValue) != "",
 				"has_base_branch":   strings.TrimSpace(baseBranch) != "",
+				"has_required_mcp":  len(requiredMCPValues) > 0,
 				"has_launch_nonce":  launchNonce != "",
 				"no_publish_intent": noPublishIntent,
 			}, func() error {
@@ -198,7 +204,11 @@ func newAxiRunCmd() *cobra.Command {
 				if err != nil {
 					return emitError(cmd, 2, err.Error())
 				}
-				return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, resolvedIntent, baseBranch, noPublishIntent, launchNonce, validationGeneration, wait, profile)
+				requiredMCP, err := parseMCPRequirementFlags(requiredMCPValues)
+				if err != nil {
+					return emitError(cmd, 2, err.Error())
+				}
+				return runAxiRunWithMCPRequirements(cmd, autoYes, skipSteps, resolvedIntent, baseBranch, noPublishIntent, launchNonce, validationGeneration, wait, requiredMCP, profile)
 			})
 		},
 	}
@@ -210,6 +220,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
 	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this run (tighten-only; full intent still reaches every step prompt except PR drafting)")
+	cmd.Flags().StringArrayVar(&requiredMCPValues, "require-mcp", nil, "require daemon-context Codex MCP authorization for a stage (repeatable, e.g. review:cloudflare)")
 	cmd.Flags().String("verification-plan", "", "capture a nonempty UTF-8 verification plan as separate run evidence (new runs only)")
 	bindAxiWaitFlag(cmd, &wait)
 	bindPiProfileFlags(cmd, &model, &effort)
@@ -221,12 +232,20 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 }
 
 func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration string, wait time.Duration, profiles ...*agentcfg.PiProfile) error {
+	return runAxiRunWithMCPRequirements(cmd, autoYes, skipSteps, intent, baseBranch, omitIntent, launchNonce, validationGeneration, wait, nil, profiles...)
+}
+
+func runAxiRunWithMCPRequirements(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration string, wait time.Duration, requiredMCP []types.MCPRequirement, profiles ...*agentcfg.PiProfile) error {
 	profile := agentcfg.OptionalPiProfile(profiles)
 	if err := profile.ValidateRequest(); err != nil {
 		return emitError(cmd, 2, err.Error())
 	}
 	if err := validateAxiWait(wait); err != nil {
 		return emitError(cmd, 2, err.Error(), "Pass a positive duration such as --wait 8m")
+	}
+	requiredMCP, err := types.CanonicalMCPRequirements(requiredMCP)
+	if err != nil {
+		return emitError(cmd, 2, err.Error())
 	}
 	planPath := ""
 	planRequested := cmd.Flags().Changed("verification-plan")
@@ -258,6 +277,9 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 	if err := requireDaemonHonorsOmitIntent(env.client, omitIntent, globalCfg); err != nil {
 		return emitError(cmd, 2, err.Error())
 	}
+	if err := requireDaemonMCPReadiness(env.client, requiredMCP); err != nil {
+		return emitError(cmd, 2, err.Error())
+	}
 
 	branch, err := git.CurrentBranch(ctx, ".")
 	if err != nil {
@@ -285,7 +307,7 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		if strings.TrimSpace(validationGeneration) == "" {
 			return emitError(cmd, 2, "--validation-generation is required with --launch-nonce")
 		}
-		receipt, err := claimLaunchReceipt(env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profile)
+		receipt, err := claimLaunchReceiptWithMCP(env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, requiredMCP, profile)
 		if err != nil {
 			return emitError(cmd, 1, fmt.Sprintf("claim launch receipt: %v", err))
 		}
@@ -305,6 +327,9 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			return emitError(cmd, 1, fmt.Sprintf("get active run: %v", err))
 		}
 		if active != nil {
+			if len(requiredMCP) > 0 && !sameMCPRequirements(active.RequiredMCP, requiredMCP) {
+				return emitError(cmd, 2, "active run has different required MCP dependencies; omit --require-mcp to reattach")
+			}
 			if !active.PiProfile.Matches(profile) {
 				return emitError(cmd, 2, "active run has a different Pi profile; omit --model/--effort to reattach")
 			}
@@ -378,12 +403,12 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		}
 		var err error
 		if launchNonce != "" {
-			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, omitIntent, launchNonce, validationGeneration, planID, profile)
+			launchReceipt, err = triggerProofRunWithMCP(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, omitIntent, launchNonce, validationGeneration, planID, requiredMCP, profile)
 			if err == nil {
 				runID = launchReceipt.RunID
 			}
 		} else {
-			runID, err = triggerRun(ctx, env, branch, skipSteps, intent, baseBranch, omitIntent, planID, profile)
+			runID, err = triggerRunWithMCP(ctx, env, branch, skipSteps, intent, baseBranch, omitIntent, planID, requiredMCP, profile)
 		}
 		if err == nil && planID != "" && runID != planID {
 			err = fmt.Errorf("launched run does not own the captured verification plan")
@@ -611,9 +636,14 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 // no-op (the gate already had this commit). Callers must check for an existing
 // active run first (see activeRunID) and apply pre-flight guards.
 func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, planID string, profiles ...*agentcfg.PiProfile) (string, error) {
+	return triggerRunWithMCP(ctx, env, branch, skipSteps, intent, baseBranch, omitIntent, planID, nil, profiles...)
+}
+
+func triggerRunWithMCP(ctx context.Context, env *axiEnv, branch string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, planID string, requiredMCP []types.MCPRequirement, profiles ...*agentcfg.PiProfile) (string, error) {
 	profile := agentcfg.OptionalPiProfile(profiles)
 	pushOptions := append(formatSkipPushOptions(skipSteps), formatPiProfilePushOptions(profile)...)
 	pushOptions = append(pushOptions, formatVerificationPlanPushOptions(planID)...)
+	pushOptions = append(pushOptions, formatMCPRequirementPushOptions(requiredMCP)...)
 	if opt := formatIntentPushOption(intent); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
@@ -686,6 +716,9 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 		if planID != "" && (run.VerificationPlan == nil || run.VerificationPlan.ID != planID) {
 			return "", fmt.Errorf("triggered run has a conflicting verification plan")
 		}
+		if !sameMCPRequirements(run.RequiredMCP, requiredMCP) {
+			return "", fmt.Errorf("triggered run has conflicting MCP requirements")
+		}
 		return run.ID, nil
 	}
 	if !shouldRerunAfterNoActiveRun(pushErr) {
@@ -699,6 +732,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 	params.OmitIntent = omitIntent
 	params.PiProfile = profile
 	params.VerificationPlanID = planID
+	params.RequiredMCP = requiredMCP
 	params.CallerHeadSHA, err = rerunCallerHead(ctx)
 	if err != nil {
 		return "", err
@@ -713,9 +747,13 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 }
 
 func claimLaunchReceipt(client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch string, omitIntent bool, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+	return claimLaunchReceiptWithMCP(client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch, omitIntent, nil, profiles...)
+}
+
+func claimLaunchReceiptWithMCP(client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch string, omitIntent bool, requiredMCP []types.MCPRequirement, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	var result ipc.ClaimLaunchReceiptResult
 	if err := client.Call(ipc.MethodClaimLaunchReceipt, &ipc.ClaimLaunchReceiptParams{
-		RepoID: repoID, Branch: branch, LaunchNonce: launchNonce, PiProfile: agentcfg.OptionalPiProfile(profiles),
+		RepoID: repoID, Branch: branch, LaunchNonce: launchNonce, PiProfile: agentcfg.OptionalPiProfile(profiles), RequiredMCP: requiredMCP,
 		SubmittedHeadSHA: submittedHeadSHA, ValidationGeneration: validationGeneration, IntentDigest: intentDigest, PRBaseBranch: baseBranch, OmitIntent: omitIntent,
 	}, &result); err != nil {
 		return nil, err
@@ -730,9 +768,14 @@ func claimLaunchReceipt(client *ipc.Client, repoID, branch, launchNonce, submitt
 // the matching nonce-bound receipt. Ordinary active-run heuristics never prove
 // strict launch identity.
 func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration, planID string, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+	return triggerProofRunWithMCP(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, omitIntent, launchNonce, validationGeneration, planID, nil, profiles...)
+}
+
+func triggerProofRunWithMCP(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration, planID string, requiredMCP []types.MCPRequirement, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	profile := agentcfg.OptionalPiProfile(profiles)
 	pushOptions := append(formatSkipPushOptions(skipSteps), formatPiProfilePushOptions(profile)...)
 	pushOptions = append(pushOptions, formatVerificationPlanPushOptions(planID)...)
+	pushOptions = append(pushOptions, formatMCPRequirementPushOptions(requiredMCP)...)
 	pushOptions = append(pushOptions,
 		formatIntentPushOption(intent),
 		formatLaunchNoncePushOption(launchNonce),
@@ -754,14 +797,14 @@ func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, s
 		}
 		return nil, fmt.Errorf("push %q to gate: %w", branch, pushErr)
 	}
-	if receipt, err := waitForLaunchReceipt(ctx, env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, intent, baseBranch, omitIntent, triggerWaitTimeout, profile); err != nil {
+	if receipt, err := waitForLaunchReceipt(ctx, env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, intent, baseBranch, omitIntent, requiredMCP, triggerWaitTimeout, profile); err != nil {
 		return nil, err
 	} else if receipt != nil {
 		return receipt, nil
 	}
 	var result ipc.StartFreshRunResult
 	if err := env.client.Call(ipc.MethodStartFreshRun, &ipc.StartFreshRunParams{
-		RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, SkipSteps: skipSteps,
+		RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, SkipSteps: skipSteps, RequiredMCP: requiredMCP,
 		Intent: intent, LaunchNonce: launchNonce, ValidationGeneration: validationGeneration, PRBaseBranch: baseBranch, OmitIntent: omitIntent, PiProfile: profile, VerificationPlanID: planID,
 	}, &result); err != nil {
 		return nil, fmt.Errorf("start fresh run: %w", err)
@@ -769,13 +812,13 @@ func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, s
 	return &result.Receipt, nil
 }
 
-func waitForLaunchReceipt(ctx context.Context, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intent, baseBranch string, omitIntent bool, timeout time.Duration, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+func waitForLaunchReceipt(ctx context.Context, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intent, baseBranch string, omitIntent bool, requiredMCP []types.MCPRequirement, timeout time.Duration, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	poll := time.NewTicker(150 * time.Millisecond)
 	defer poll.Stop()
 	for {
-		receipt, err := claimLaunchReceipt(client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profiles...)
+		receipt, err := claimLaunchReceiptWithMCP(client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, requiredMCP, profiles...)
 		if err != nil {
 			return nil, err
 		}
@@ -980,6 +1023,14 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			}
 			if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
 				fmt.Fprintf(progress, "%s: unvalidated work in the run worktree requires an explicit response; --yes leaves this gate awaiting a response\n", gate.Name)
+				return run, false, nil
+			}
+			if pipeline.HasIncompleteAgentInvocationRefusal(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: the Review/Test agent invocation did not finish validation; --yes leaves this gate awaiting a response\n", gate.Name)
+				return run, false, nil
+			}
+			if pipeline.HasMCPAuthorizationRefusal(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: required MCP authorization is missing from the daemon executor context; --yes leaves this gate awaiting a human\n", gate.Name)
 				return run, false, nil
 			}
 			gateKey := gate.Name + "\x00" + gate.Status

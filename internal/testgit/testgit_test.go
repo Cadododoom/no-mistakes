@@ -11,8 +11,9 @@ import (
 // Doing so live would recurse the test runner itself - the exact failure
 // this package exists to prevent (issue #5).
 func TestRealGit_IgnoresWrapperOnPATH(t *testing.T) {
-	if _, err := os.Stat("/usr/bin/git"); err != nil {
-		t.Skip("/usr/bin/git not present on this host")
+	want, err := RealGit()
+	if err != nil {
+		t.Skip(err)
 	}
 
 	wrapperDir := t.TempDir()
@@ -29,7 +30,7 @@ func TestRealGit_IgnoresWrapperOnPATH(t *testing.T) {
 	if got == wrapper {
 		t.Fatalf("RealGit() returned the PATH-shadowing wrapper %q, want an absolute real-git path", got)
 	}
-	if got != "/usr/bin/git" {
-		t.Fatalf("RealGit() = %q, want /usr/bin/git", got)
+	if got != want {
+		t.Fatalf("RealGit() = %q after shadowing PATH, want %q", got, want)
 	}
 }

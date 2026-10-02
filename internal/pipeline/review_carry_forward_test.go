@@ -23,6 +23,44 @@ const reviewCarryTwoFindings = `{"findings":[` +
 	`{"id":"review-2","severity":"warning","file":"cache.go","line":42,"description":"unbounded cache growth","action":"ask-user"}],` +
 	`"summary":"2 findings"}`
 
+func TestExecutor_ReviewRuntimeGateRetryDoesNotRequireSourceCoverage(t *testing.T) {
+	for _, finding := range []types.Finding{
+		{ID: types.FindingIDReviewAgentIncomplete, Severity: "warning", Action: "ask-user", Description: "invocation incomplete"},
+		{ID: types.FindingIDMCPAuthorizationRequired, Category: types.FindingCategoryMCPAuthorization, Severity: "warning", Action: "ask-user", Description: "authorization required"},
+	} {
+		t.Run(finding.ID, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			payload, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{finding}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+				calls++
+				if calls == 1 {
+					return &StepOutcome{NeedsApproval: true, Findings: payload}, nil
+				}
+				return &StepOutcome{}, nil
+			}}
+			exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+			done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+			waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+			for _, action := range []types.ApprovalAction{types.ActionApprove, types.ActionSkip} {
+				if err := exec.Respond(types.StepReview, action, nil); err == nil {
+					t.Fatalf("runtime gate accepted %s without completing validation", action)
+				}
+			}
+			if err := exec.Respond(types.StepReview, types.ActionFix, []string{finding.ID}); err != nil {
+				t.Fatal(err)
+			}
+			waitExecutorDone(t, done)
+			if calls != 2 {
+				t.Fatalf("attempts = %d, want one retry", calls)
+			}
+		})
+	}
+}
+
 func seedRecoveredReviewGate(t *testing.T, database *db.DB, run *db.Run, findings string, status types.StepStatus, selectedIDs string) (*db.StepResult, *db.Run) {
 	t.Helper()
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {

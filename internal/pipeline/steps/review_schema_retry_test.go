@@ -270,14 +270,23 @@ func TestReviewStep_NonSchemaFailuresAreNotRetried(t *testing.T) {
 			}
 
 			outcome, err := (&ReviewStep{}).Execute(sctx)
-			if err == nil || outcome != nil {
-				t.Fatalf("Execute() = %+v, %v; want the failure returned", outcome, err)
+			var diagnostic string
+			if tc.timeout > 0 {
+				if err != nil || outcome == nil || !outcome.NeedsApproval {
+					t.Fatalf("Execute() = %+v, %v; want a timeout recovery gate", outcome, err)
+				}
+				diagnostic = outcome.Findings
+			} else {
+				if err == nil || outcome != nil {
+					t.Fatalf("Execute() = %+v, %v; want the failure returned", outcome, err)
+				}
+				diagnostic = err.Error()
 			}
 			if len(ag.calls) != 1 {
 				t.Fatalf("agent calls = %d, want 1: only a schema slip reruns the review", len(ag.calls))
 			}
-			if !strings.Contains(err.Error(), tc.wantError) || strings.Contains(err.Error(), "attempts") {
-				t.Fatalf("error = %q, want the unchanged failure %q", err, tc.wantError)
+			if !strings.Contains(diagnostic, tc.wantError) || strings.Contains(diagnostic, "attempts") {
+				t.Fatalf("error = %q, want the unchanged failure %q", diagnostic, tc.wantError)
 			}
 		})
 	}
