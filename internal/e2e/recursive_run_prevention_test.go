@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -69,13 +70,22 @@ func runRecursiveIncident(t *testing.T, agentName, executable, expectedPhase str
 
 	h.CommitChange("feature/recursive-incident", "incident.txt", "reproduce recursive run\n", "reproduce recursive run")
 	h.PushToGate("feature/recursive-incident")
-	outer := h.WaitForRun("feature/recursive-incident", 90*time.Second)
-	expectedStatus := types.RunFailed
+	var outer *ipc.RunInfo
 	if completes {
-		expectedStatus = types.RunCompleted
-	}
-	if outer.Status != expectedStatus {
-		t.Fatalf("outer run status = %s, want %s (error=%v)", outer.Status, expectedStatus, outer.Error)
+		outer = h.WaitForRun("feature/recursive-incident", 90*time.Second)
+		if outer.Status != types.RunCompleted {
+			t.Fatalf("outer run status = %s, want completed (error=%v)", outer.Status, outer.Error)
+		}
+	} else {
+		outer = waitForStepStatus(t, h, "feature/recursive-incident", types.StepReview, types.StepStatusAwaitingApproval, 90*time.Second)
+		step, ok := findStep(outer.Steps, types.StepReview)
+		if !ok || step.FindingsJSON == nil {
+			t.Fatal("expected incomplete review recovery gate after incident agent exit")
+		}
+		findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
+		if err != nil || len(findings.Items) != 1 || findings.Items[0].ID != "review-agent-incomplete" {
+			t.Fatalf("unexpected review recovery findings: %+v (error=%v)", findings, err)
+		}
 	}
 
 	attempts, err := os.ReadFile(attemptLog)

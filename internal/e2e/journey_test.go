@@ -1610,19 +1610,21 @@ func assertReviewAgentErrorRun(t *testing.T, h *Harness) {
 	t.Helper()
 	h.CommitChange("review-agent-error", "review-agent-error.txt", "review agent error\n", "add review agent error")
 	h.PushToGate("review-agent-error")
-	run := h.WaitForRun("review-agent-error", 60*time.Second)
-	if run.Status != types.RunFailed {
-		t.Fatalf("review-agent-error run status = %s, want failed", run.Status)
+	run := waitForStepStatus(t, h, "review-agent-error", types.StepReview, types.StepStatusAwaitingApproval, 60*time.Second)
+	if run.Status != types.RunRunning {
+		t.Fatalf("review-agent-error run status = %s, want recoverable running gate", run.Status)
 	}
 	reviewStep, ok := findStep(run.Steps, types.StepReview)
-	if !ok {
-		t.Fatal("expected review step in review-agent-error run")
+	if !ok || reviewStep.FindingsJSON == nil {
+		t.Fatal("expected preserved review findings after agent exit")
 	}
-	if reviewStep.Status != types.StepStatusFailed {
-		t.Fatalf("expected review step to fail after agent error, got %s", reviewStep.Status)
+	findings, err := types.ParseFindingsJSON(*reviewStep.FindingsJSON)
+	if err != nil || len(findings.Items) != 1 || findings.Items[0].ID != "review-agent-incomplete" {
+		t.Fatalf("expected recoverable agent-exit finding, got %+v (error=%v)", findings, err)
 	}
-	if reviewStep.Error == nil || !strings.Contains(*reviewStep.Error, "agent review") {
-		t.Fatalf("expected review step error to mention agent review, got %q", deref(reviewStep.Error))
+	h.CancelRun(run.ID)
+	if cancelled := h.WaitForRun("review-agent-error", 60*time.Second); cancelled.Status != types.RunCancelled {
+		t.Fatalf("explicit cancellation did not close agent-exit gate: %s", cancelled.Status)
 	}
 }
 
