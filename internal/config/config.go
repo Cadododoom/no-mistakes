@@ -40,21 +40,21 @@ const (
 	// DefaultStepQuietWarning is how long a running/fixing step can go without
 	// a new log or lifecycle activity before AXI status marks it quiet.
 	DefaultStepQuietWarning = 10 * time.Minute
-	// DefaultAgentTimeout is the silent-kill budget for one pipeline agent
-	// invocation that does not install a more specific deadline, so a silent
-	// agent cannot leave a run active forever. A still-working invocation
-	// continues past it only when the matching working timeout is set.
-	// Review and Test keep their own knobs; this is the default-by-construction
-	// budget for every other step.
-	DefaultAgentTimeout = 30 * time.Minute
-	// DefaultReviewAgentTimeout is the stall budget for one review or
-	// review-fix invocation. Every later invocation derives a fresh budget, so
-	// a stalled agent is bounded without charging the next turn.
-	DefaultReviewAgentTimeout = 30 * time.Minute
-	// DefaultTestAgentTimeout is the stall budget for one Test-step agent
-	// invocation, including the post-test evidence-gathering turn and a
-	// Test-repair turn, so a silent agent cannot leave a run active forever.
-	DefaultTestAgentTimeout = 30 * time.Minute
+	// MaxAgentInvocationTimeout is the recovery ceiling for one active agent
+	// invocation. A healthy invocation can run to this ceiling; its stage then
+	// preserves work and parks for explicit retry or cancellation.
+	MaxAgentInvocationTimeout = 8 * time.Hour
+	// DefaultAgentTimeout bounds one pipeline agent invocation that does not
+	// install a more specific deadline. The long ceiling avoids truncating
+	// healthy agent work; Review and Test turn the same ceiling into a
+	// recoverable gate that preserves unvalidated changes.
+	DefaultAgentTimeout = 8 * time.Hour
+	// DefaultReviewAgentTimeout is the recovery ceiling for one review or
+	// review-fix invocation. Every later invocation derives a fresh budget.
+	DefaultReviewAgentTimeout = 8 * time.Hour
+	// DefaultTestAgentTimeout bounds one Test-step agent invocation, including
+	// the post-test evidence-gathering turn and a Test-repair turn.
+	DefaultTestAgentTimeout = 8 * time.Hour
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
 	// daemon socket that exists but is not accepting connections.
 	DefaultDaemonConnectTimeout = 3 * time.Second
@@ -149,6 +149,18 @@ const (
 	// grow the directory without bound.
 	DefaultWorktreeMaxRuns = 20
 )
+
+// BoundAgentInvocationTimeout preserves shorter configured budgets while
+// enforcing the maximum unattended invocation time.
+func BoundAgentInvocationTimeout(configured, fallback time.Duration) time.Duration {
+	if configured <= 0 {
+		configured = fallback
+	}
+	if configured <= 0 || configured > MaxAgentInvocationTimeout {
+		return MaxAgentInvocationTimeout
+	}
+	return configured
+}
 
 // GlobalConfig represents ~/.no-mistakes/config.yaml.
 type GlobalConfig struct {
@@ -1204,35 +1216,31 @@ ci_timeout: "168h"
 # only; it never cancels work.
 step_quiet_warning: "10m"
 
-# Silent-kill budget for one pipeline agent invocation that does not install a
-# more specific deadline (document, lint, rebase, PR, CI-fix, and auto-fix).
-# A turn with no output and no live child stops here. A still-working turn
-# continues past it only when agent_working_timeout is set.
-agent_timeout: "30m"
+# Invocation budget for one pipeline agent invocation that does not
+# install a more specific deadline (document, lint, rebase, PR, CI-fix, and
+# auto-fix). Review and Test use their own recoverable gate at the same limit.
+agent_timeout: "8h"
 
-# Optional cap for a turn that is still producing output or waiting on a live
-# child. Unset means no extension past agent_timeout. Must be at least
-# agent_timeout. The 10-minute quiet stop still ends a turn that goes idle.
-# agent_working_timeout: "1h"
+# Optional still-working cap when using a shorter agent_timeout; maximum 8h.
+# agent_working_timeout: "8h"
 
-# Silent-kill budget for one Review agent invocation. Each optional fixer and
-# each fresh independent rereviewer receives a new full budget. A still-working
-# review continues past it only when review_agent_working_timeout is set.
-review_agent_timeout: "30m"
+# Invocation budget for one Review agent invocation. Each optional
+# fixer and each fresh independent rereviewer receives a new full limit. At
+# expiry Review parks for a recoverable retry or abort and preserves work.
+review_agent_timeout: "8h"
 
-# Optional still-working cap for Review. Unset means no extension past
-# review_agent_timeout. Must be at least review_agent_timeout.
-# review_agent_working_timeout: "1h"
+# Optional still-working cap when using a shorter review budget; maximum 8h.
+# review_agent_working_timeout: "8h"
 
-# Silent-kill budget for one Test-step agent invocation, including the post-test
-# evidence-gathering turn. A silent test agent parks for a decision instead of
-# leaving the run active. A still-working one continues past it only when
-# test_agent_working_timeout is set.
-test_agent_timeout: "30m"
+# Maximum wall-clock time for one Test-step agent invocation, including the
+# post-test evidence-gathering turn. A stalled test agent parks for a decision
+# instead of leaving the run active. Each invocation receives up to eight
+# hours; the default accommodates long local builds and live validation.
+test_agent_timeout: "8h"
 
 # Optional still-working cap for Test. Unset means no extension past
 # test_agent_timeout. Must be at least test_agent_timeout.
-# test_agent_working_timeout: "1h"
+# test_agent_working_timeout: "8h"
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.

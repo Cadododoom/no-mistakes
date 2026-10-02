@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"time"
@@ -25,6 +26,11 @@ var _ pipeline.ApprovalOverrideVerifier = (*TestStep)(nil)
 func (s *TestStep) Name() types.StepName { return types.StepTest }
 
 func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if outcome, parked, err := mcpPreflightOutcome(sctx, types.StepTest); err != nil {
+		return nil, err
+	} else if parked {
+		return outcome, nil
+	}
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
@@ -68,7 +74,10 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	var newTestsFromFix []string
 	var fixSummary string
 	var repairCut error
-	if sctx.Fixing && onlyTestBudgetCutFindings(sctx.PreviousFindings) {
+	if sctx.Fixing && onlyMCPAuthorizationFindings(sctx.PreviousFindings) {
+		sctx.Log("retrying Test without a repair turn after MCP authorization; re-probing before checks...")
+		fixSummary = NoChangesAppliedSummary
+	} else if sctx.Fixing && onlyTestBudgetCutFindings(sctx.PreviousFindings) {
 		sctx.Log("fix selection holds only the Test agent budget cut; re-running validation without a repair turn...")
 		fixSummary = NoChangesAppliedSummary
 	} else if sctx.Fixing {
@@ -123,7 +132,10 @@ Previous test findings to address:
 			},
 		})
 		if err != nil {
-			if !errors.Is(err, errTestAgentTimeout) {
+			if status, ok := mcpAuthorizationStatusFromError(err); ok {
+				return mcpAuthorizationOutcome(sctx, s.Name(), status, true), nil
+			}
+			if !errors.Is(err, errTestAgentTimeout) && !isTestAgentProcessExit(err) {
 				return nil, err
 			}
 			repairCut = err
@@ -178,6 +190,9 @@ Previous test findings to address:
 		}
 	}
 	if repairCut != nil {
+		if isTestAgentProcessExit(repairCut) {
+			return testAgentProcessExitOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
+		}
 		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
 	}
 
@@ -304,8 +319,16 @@ Rules:
 	)
 	findings, err := runTestAnalyzer(sctx, evidencePrompt)
 	if err != nil {
+		if status, ok := mcpAuthorizationStatusFromError(err); ok {
+			return mcpAuthorizationOutcome(sctx, s.Name(), status, true), nil
+		}
 		if errors.Is(err, errTestAgentTimeout) {
 			outcome := testAgentTimeoutOutcome(sctx, err, startHead, baselineFindings, baselineSummary, baselineExitCode)
+			outcome.FixSummary = fixSummary
+			return outcome, nil
+		}
+		if isTestAgentProcessExit(err) {
+			outcome := testAgentProcessExitOutcome(sctx, err, startHead, baselineFindings, baselineSummary, baselineExitCode)
 			outcome.FixSummary = fixSummary
 			return outcome, nil
 		}
@@ -583,7 +606,7 @@ func mergeNewTestFiles(fromFix, fromEvidence []string) []string {
 
 func testAgentTimeout(sctx *pipeline.StepContext) time.Duration {
 	if sctx != nil && sctx.Config != nil && sctx.Config.TestAgentTimeout > 0 {
-		return sctx.Config.TestAgentTimeout
+		return config.BoundAgentInvocationTimeout(sctx.Config.TestAgentTimeout, config.DefaultTestAgentTimeout)
 	}
 	return config.DefaultTestAgentTimeout
 }
@@ -628,12 +651,11 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 		Action:   types.ActionAskUser,
 		Description: fmt.Sprintf(
 			"The Test agent did not finish within its invocation budget. "+
-				"Reported: %v. %s "+
+				"Evidence: %s. %s "+
 				"Re-running the same request costs another full budget, so no further attempt is made automatically. "+
-				"If this repository's targeted tests or evidence gathering routinely stay quiet longer than the default %s, raise test_agent_timeout in global config. "+
-				"If the turn was still producing output or running a child process, set or raise test_agent_working_timeout there instead: a turn runs past test_agent_timeout only up to that still-working cap. "+
-				"Respond with fix to spend another budget: a repair turn runs only for selected findings other than this budget cut, then validation re-runs. Or abort and retry after raising the budget.",
-			err, cause, config.DefaultTestAgentTimeout),
+				"Elapsed time, process ID, and last activity remain available in the step status and log. "+
+				"Respond with fix to retry validation, or abort the run.",
+			safeTestAgentFailure(err), cause),
 	}}
 	validatedHead := park.TestedHeadSHA
 	if validatedHead == "" {
@@ -662,6 +684,50 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 		Findings:      string(findingsJSON),
 		ExitCode:      exitCode,
 	}
+}
+
+func testAgentProcessExitOutcome(sctx *pipeline.StepContext, err error, startHead string, baseline []Finding, baselineSummary string, exitCode int) *pipeline.StepOutcome {
+	outcome := testAgentTimeoutOutcome(sctx, err, startHead, baseline, baselineSummary, exitCode)
+	findings, parseErr := types.ParseFindingsJSON(outcome.Findings)
+	if parseErr != nil {
+		return outcome
+	}
+	for i := range findings.Items {
+		if findings.Items[i].ID == types.FindingIDTestAgentTimeout {
+			findings.Items[i].ID = types.FindingIDTestAgentIncomplete
+			findings.Items[i].Description = "The Test agent process exited before a complete evidence turn. Evidence: " + safeTestAgentFailure(err) + ". Respond with fix to retry Test with the run worktree preserved, or abort."
+		}
+	}
+	findings.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, "Test agent process exited before evidence completed"}, "\n"))
+	findings.TestingSummary = "The Test agent process exited before live validation completed; no result from the incomplete turn was used."
+	payload, _ := json.Marshal(findings)
+	outcome.Findings = string(payload)
+	return outcome
+}
+
+func safeTestAgentFailure(err error) string {
+	var invocation *testAgentInvocationError
+	if errors.As(err, &invocation) {
+		return invocation.Error()
+	}
+	return "the Test agent invocation ended before evidence completed"
+}
+
+func testAgentObservation(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	for _, marker := range []string{"agent produced no output", "agent last produced output"} {
+		if index := strings.Index(text, marker); index >= 0 {
+			text = text[index:]
+			if report := strings.Index(text, "; agent reported:"); report >= 0 {
+				text = text[:report]
+			}
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
 }
 
 // answeredTestGate is what a fix round carries onto a budget-cut park from the
@@ -700,7 +766,7 @@ func answeredTestGate(sctx *pipeline.StepContext) Findings {
 // testBudgetCutIDs are the step-owned findings of a Test budget-cut park. They
 // are operator decisions, never defects for an agent to repair, so an agent's
 // own finding can never claim them.
-var testBudgetCutIDs = []string{types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork}
+var testBudgetCutIDs = []string{types.FindingIDTestAgentTimeout, types.FindingIDTestAgentIncomplete, types.FindingIDTestAgentUnvalidatedWork}
 
 // onlyTestBudgetCutFindings reports whether a fix selection holds nothing but
 // a Test budget cut, which leaves the repair turn nothing to repair.
@@ -804,17 +870,48 @@ func porcelainPaths(status string) []string {
 	return paths
 }
 
-// testAgentError renders a Test-invocation budget expiry. The shared
-// agent-run seam supplies which bound cut the turn (silent budget, stall budget, or still-working cap),
-// how long it ran, and the measured activity evidence.
+// testAgentError records bounded activity evidence for a timed-out Test turn
+// and an exit status for a process that terminated before a complete result.
 func testAgentError(timeout time.Duration, prefix string, err error) error {
 	if timeout > 0 && errors.Is(err, errTestAgentTimeout) {
-		return fmt.Errorf("%s timed out %s: %w", prefix, pipeline.AgentBudgetBound(err, timeout), err)
+		return &testAgentInvocationError{prefix: prefix, timeout: timeout, timedOut: true, bound: pipeline.AgentBudgetBound(err, timeout), evidence: testAgentObservation(err), cause: errors.Join(errTestAgentTimeout, err)}
 	}
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return &testAgentInvocationError{prefix: prefix, exitCode: exitErr.ExitCode(), evidence: fmt.Sprintf("agent process exited with status %d", exitErr.ExitCode()), cause: err}
+		}
 		return fmt.Errorf("%s: %w", prefix, err)
 	}
 	return nil
+}
+
+type testAgentInvocationError struct {
+	prefix   string
+	timeout  time.Duration
+	exitCode int
+	timedOut bool
+	bound    string
+	evidence string
+	cause    error
+}
+
+func (e *testAgentInvocationError) Error() string {
+	if e.timedOut {
+		message := fmt.Sprintf("%s timed out %s", e.prefix, e.bound)
+		if e.evidence != "" {
+			message += "; " + e.evidence
+		}
+		return message
+	}
+	return fmt.Sprintf("%s: %s", e.prefix, e.evidence)
+}
+
+func (e *testAgentInvocationError) Unwrap() error { return e.cause }
+
+func isTestAgentProcessExit(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
 }
 
 // VerifyApprovalOverride implements pipeline.ApprovalOverrideVerifier. It

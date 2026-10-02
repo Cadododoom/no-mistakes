@@ -262,7 +262,7 @@ whose category is `review-question`, which means:
 - `runs.awaiting_agent_since` is stamped and `runs.parked_ms` accrues, exactly
   as documented in `AGENTS.md` under **Parked / Awaiting-Agent Signal**;
 - the TUI, the IPC event stream and `axi status` already surface the park;
-- `review_agent_timeout` (30 m) cannot count the wait, because there is no
+- `review_agent_timeout` (up to 8 h per active invocation) cannot count the wait, because there is no
   agent turn in flight: the turn ended before the park, and the finalize turn
   is a fresh invocation with its own stall budget from the shared agent-run path.
 

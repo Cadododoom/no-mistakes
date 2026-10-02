@@ -19,13 +19,13 @@ import (
 // budget; a late successful return after this cause is still a timeout.
 var ErrAgentTimeout = errors.New("agent timeout")
 
-// AgentTimeout is the silent-kill budget applied at the shared agent-run
-// seam. A positive Config.AgentTimeout wins; otherwise the default (30m).
+// AgentTimeout is the per-invocation budget applied at the shared agent-run
+// seam. A positive Config.AgentTimeout wins up to the 8h recovery ceiling.
 func AgentTimeout(cfg *config.Config) time.Duration {
 	if cfg != nil && cfg.AgentTimeout > 0 {
-		return cfg.AgentTimeout
+		return config.BoundAgentInvocationTimeout(cfg.AgentTimeout, config.DefaultAgentTimeout)
 	}
-	return config.DefaultAgentTimeout
+	return config.BoundAgentInvocationTimeout(0, config.DefaultAgentTimeout)
 }
 
 // AgentWorkingTimeout is the optional still-working cap for the shared seam.
@@ -95,7 +95,23 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 		cause = ErrAgentTimeout
 	}
 	if sctx != nil {
+		opts.ManageMCPAvailability = true
 		ag = sctx.Agent
+		if sctx.Run != nil && sctx.StepName != "" {
+			requirements, err := sctx.Run.MCPRequirements()
+			if err != nil {
+				return nil, fmt.Errorf("read run MCP requirements: %w", err)
+			}
+			for _, requirement := range requirements {
+				if requirement.Stage == sctx.StepName {
+					opts.RequiredMCPServers = append(opts.RequiredMCPServers, requirement.Server)
+				}
+			}
+		}
+	}
+	timeout = config.BoundAgentInvocationTimeout(timeout, config.DefaultAgentTimeout)
+	if working > config.MaxAgentInvocationTimeout {
+		working = config.MaxAgentInvocationTimeout
 	}
 	activity := observeAgentActivity(&opts)
 	return invokeAgent(parent, timeout, working, cause, activity, func(ctx context.Context) (*agent.Result, error) {

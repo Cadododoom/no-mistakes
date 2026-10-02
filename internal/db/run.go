@@ -101,11 +101,13 @@ type Run struct {
 	// ClosingIssueRefsLockedAt is non-nil once a PR body composition has sampled
 	// ClosingIssueRefs, after which a reattach can no longer add to them.
 	ClosingIssueRefsLockedAt *int64
+	// RequiredMCPJSON is the immutable stage/server dependency declaration.
+	RequiredMCPJSON string
 	CreatedAt                int64
 	UpdatedAt                int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, COALESCE(required_mcp_json, ''), created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -121,6 +123,7 @@ func scanRun(row interface {
 		&r.LaunchNonce, &r.LaunchValidationGeneration, &r.LaunchIntentDigest, &r.LaunchReceiptClaimedAt,
 		&r.PRBaseBranch, &r.OmitIntent, &r.PiProfile, &r.VerificationPlan,
 		&storedClosingIssues, &r.ClosingIssueRefsLockedAt,
+		&r.RequiredMCPJSON,
 		&r.CreatedAt, &r.UpdatedAt,
 	)
 	if err != nil {
@@ -131,6 +134,15 @@ func scanRun(row interface {
 		return fmt.Errorf("decode run closing issue references: %w", err)
 	}
 	return nil
+}
+
+// MCPRequirements returns the immutable per-run MCP requirements, failing
+// closed if a stored value cannot be parsed or validated.
+func (r *Run) MCPRequirements() ([]types.MCPRequirement, error) {
+	if r == nil {
+		return nil, nil
+	}
+	return types.ParseMCPRequirements(r.RequiredMCPJSON)
 }
 
 // WorktreePath returns the recorded worktree directory of this run, or "" for
@@ -157,8 +169,18 @@ func (d *DB) InsertRunWithIntent(repoID, branch, headSHA, baseSHA string, intent
 // duplicate defense across daemon processes; callers additionally serialize
 // selection under their branch lock.
 func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, profiles ...*agentcfg.PiProfile) (*Run, error) {
+	return d.InsertRunWithIntentAndLaunchNonceAndMCP(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, omitIntent, plan, nil, profiles...)
+}
+
+// InsertRunWithIntentAndLaunchNonceAndMCP additionally pins declared MCP
+// dependencies so recovery and reruns cannot silently change stage readiness.
+func (d *DB) InsertRunWithIntentAndLaunchNonceAndMCP(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, requirements []types.MCPRequirement, profiles ...*agentcfg.PiProfile) (*Run, error) {
 	pin := agentcfg.OptionalPiProfile(profiles)
 	if err := pin.Validate(); err != nil {
+		return nil, err
+	}
+	requiredMCP, err := types.MarshalMCPRequirements(requirements)
+	if err != nil {
 		return nil, err
 	}
 	ts := now()
@@ -174,6 +196,7 @@ func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA 
 		NoMistakesVersion:  &version,
 		NoMistakesBuildSHA: &buildSHA,
 		PiProfile:          pin,
+		RequiredMCPJSON:    requiredMCP,
 		Status:             types.RunPending,
 		CreatedAt:          ts,
 		UpdatedAt:          ts,
@@ -198,9 +221,9 @@ func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA 
 		r.PRBaseBranch = &prBaseBranch
 	}
 	r.OmitIntent = omitIntent
-	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, omit_intent, pi_profile, verification_plan, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.OmitIntent, r.PiProfile, r.VerificationPlan, r.CreatedAt, r.UpdatedAt,
+	_, err = d.sql.Exec(
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, omit_intent, pi_profile, verification_plan, required_mcp_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.OmitIntent, r.PiProfile, r.VerificationPlan, r.RequiredMCPJSON, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

@@ -212,6 +212,48 @@ func TestTestStep_BlankTestingSummaryFails(t *testing.T) {
 	}
 }
 
+func TestTestStep_EvidenceProcessExitParksAndPreservesPartialWork(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	partial := filepath.Join(dir, "test-partial.txt")
+	ag := &mockAgent{
+		name: "exiting-evidence-agent",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(partial, []byte("unfinished evidence work"), 0o644); err != nil {
+				return nil, err
+			}
+			return nil, simulatedAgentProcessExit(t, 9)
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("Execute = (%+v, %v), want recoverable Test gate", outcome, err)
+	}
+	if got, err := os.ReadFile(partial); err != nil || string(got) != "unfinished evidence work" {
+		t.Fatalf("partial Test work = %q, err = %v", got, err)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatalf("parse findings: %v", err)
+	}
+	ids := make(map[string]bool, len(findings.Items))
+	for _, finding := range findings.Items {
+		ids[finding.ID] = true
+	}
+	if !ids[types.FindingIDTestAgentIncomplete] || !ids[types.FindingIDTestAgentUnvalidatedWork] || ids[types.FindingIDTestAgentTimeout] {
+		t.Fatalf("findings = %+v, want incomplete process exit and preserved unvalidated work", findings.Items)
+	}
+	var incomplete string
+	for _, finding := range findings.Items {
+		if finding.ID == types.FindingIDTestAgentIncomplete {
+			incomplete = finding.Description
+		}
+	}
+	if !strings.Contains(incomplete, "agent process exited with status 9") {
+		t.Fatalf("incomplete finding = %q, want exit-status evidence", incomplete)
+	}
+}
+
 func TestTestStep_FixAgentTimeoutDoesNotCancelPostProcessing(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

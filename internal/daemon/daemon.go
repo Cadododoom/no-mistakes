@@ -1001,6 +1001,10 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 		if strings.TrimSpace(head) != run.HeadSHA {
 			return true, fmt.Sprintf("run %s ci monitor interrupted; worktree may hold unpushed commits; preserving", runID)
 		}
+		status, err := git.Run(ctx, wtPath, "status", "--porcelain", "--untracked-files=all")
+		if err != nil || strings.TrimSpace(status) != "" {
+			return true, fmt.Sprintf("run %s ci monitor interrupted; worktree may hold unvalidated files; preserving", runID)
+		}
 	}
 	return false, ""
 }
@@ -1008,12 +1012,20 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 // protectedPathCleanupReason protects only the index and working files. It must
 // not be used as a process-liveness or test-evidence retention predicate.
 func protectedPathCleanupReason(d *db.DB, run *db.Run) string {
-	if run == nil || (run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser) {
+	if run == nil {
 		return ""
 	}
 	results, err := d.GetStepsByRun(run.ID)
 	if err != nil {
 		return fmt.Sprintf("cannot read protected-path refusals for run %s: %v", run.ID, err)
+	}
+	for _, step := range results {
+		if step.FindingsJSON != nil && step.Status != types.StepStatusCompleted && pipeline.HasUnvalidatedWorkRefusal(*step.FindingsJSON) {
+			return fmt.Sprintf("run %s has interrupted unvalidated work; preserving index and worktree for inspection", run.ID)
+		}
+	}
+	if run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser {
+		return ""
 	}
 	for _, step := range results {
 		if step.FindingsJSON == nil || !pipeline.HasProtectedPathRefusal(*step.FindingsJSON) || step.Status == types.StepStatusCompleted {
@@ -1334,9 +1346,26 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := validateValidationGeneration(p.ValidationGeneration); err != nil {
 			return nil, err
 		}
+		requiredMCP, err := types.CanonicalMCPRequirements(p.RequiredMCP)
+		if err != nil {
+			return nil, err
+		}
 		prBaseBranch, err := normalizeRunPRBaseBranch(p.PRBaseBranch)
 		if err != nil {
 			return nil, err
+		}
+		pinnedRun, err := d.GetRunByLaunchNonce(p.RepoID, p.Branch, p.LaunchNonce)
+		if err != nil {
+			return nil, fmt.Errorf("read launch MCP requirements: %w", err)
+		}
+		if pinnedRun != nil {
+			pinnedMCP, err := pinnedRun.MCPRequirements()
+			if err != nil {
+				return nil, fmt.Errorf("read launch MCP requirements: %w", err)
+			}
+			if !sameMCPRequirements(pinnedMCP, requiredMCP) {
+				return nil, fmt.Errorf("conflicting launch_nonce: MCP requirements differ from run pin")
+			}
 		}
 		run, claimed, err := d.ClaimLaunchReceipt(p.RepoID, p.Branch, p.LaunchNonce, p.SubmittedHeadSHA, p.ValidationGeneration, p.IntentDigest, prBaseBranch, p.OmitIntent, p.PiProfile)
 		if err != nil {
@@ -1368,6 +1397,9 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 	// Capability probe for --no-publish-intent: see ipc.ProbeOmitIntentResult.
 	srv.Handle(ipc.MethodProbeOmitIntent, func(context.Context, json.RawMessage) (interface{}, error) {
 		return &ipc.ProbeOmitIntentResult{OK: true}, nil
+	})
+	srv.Handle(ipc.MethodProbeMCPReadiness, func(context.Context, json.RawMessage) (interface{}, error) {
+		return &ipc.ProbeMCPReadinessResult{OK: true}, nil
 	})
 
 	srv.Handle(ipc.MethodCaptureVerificationPlan, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
@@ -1446,7 +1478,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		runID, err := mgr.HandleRerun(ctx, p.RepoID, p.Branch, p.PreviousRunID, p.SkipSteps, p.Intent, p.PRBaseBranch, p.OmitIntent, p.CallerHeadSHA, p.VerificationPlanID, p.ClosingIssueRefs, p.PiProfile)
+		runID, err := mgr.HandleRerunWithMCP(ctx, p.RepoID, p.Branch, p.PreviousRunID, p.SkipSteps, p.Intent, p.PRBaseBranch, p.OmitIntent, p.CallerHeadSHA, p.VerificationPlanID, p.ClosingIssueRefs, p.RequiredMCP, p.PiProfile)
 		if err != nil {
 			return nil, err
 		}
@@ -1601,6 +1633,9 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		AwaitingAgentSince: r.AwaitingAgentSince,
 		CreatedAt:          r.CreatedAt,
 		UpdatedAt:          r.UpdatedAt,
+	}
+	if requirements, err := r.MCPRequirements(); err == nil {
+		info.RequiredMCP = requirements
 	}
 	if len(steps) > 0 {
 		info.Steps = make([]ipc.StepResultInfo, 0, len(steps))

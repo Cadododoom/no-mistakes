@@ -94,7 +94,7 @@ func TestFailedInvocationUsageJourney(t *testing.T) {
 		Scenario: scenario,
 		// The killed round below must be ended by the pipeline's budget, not
 		// by the fake. Keep it short so the journey stays fast; the timeout
-		// path is identical at the production half hour.
+		// path is identical at the production eight hours.
 		GlobalConfigExtra: strings.Join([]string{
 			`agent_timeout: "5s"`,
 			`review_agent_timeout: "5s"`,
@@ -148,9 +148,9 @@ func TestFailedInvocationUsageJourney(t *testing.T) {
 	// Round 2: the round was killed before the adapter ever saw usage.
 	h.CommitChange("usage-unknown-on-killed-review", "killed.txt", "change\n", "exercise a killed review round")
 	h.PushToGate("usage-unknown-on-killed-review")
-	killed := h.WaitForRun("usage-unknown-on-killed-review", 120*time.Second)
-	if killed.Status != types.RunFailed {
-		t.Fatalf("killed-review run status = %s, want failed (error=%v)", killed.Status, deref(killed.Error))
+	killed := waitForStepStatus(t, h, "usage-unknown-on-killed-review", types.StepReview, types.StepStatusAwaitingApproval, 120*time.Second)
+	if killed.Status != types.RunRunning {
+		t.Fatalf("killed-review run status = %s, want a parked running run (error=%v)", killed.Status, deref(killed.Error))
 	}
 
 	killedStats, err := h.Run("stats", "--run", killed.ID)

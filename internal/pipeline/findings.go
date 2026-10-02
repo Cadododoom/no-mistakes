@@ -776,6 +776,17 @@ func filterFindingsJSON(raw string, ids []string) string {
 // re-park on it for ever. It is re-emitted from the live conversation on every
 // review turn exactly as the questions are, so dropping it loses nothing either.
 func dropReviewQuestionFindingsJSON(raw string) string {
+	return filterReviewControlFindingsJSON(raw, false)
+}
+
+// Invocation and authorization gates describe runtime readiness, rather than
+// source defects. Each attempt re-emits an unresolved gate; source coverage
+// cannot resolve one, and carrying it would strand a successful retry.
+func dropReviewControlFindingsJSON(raw string) string {
+	return filterReviewControlFindingsJSON(raw, true)
+}
+
+func filterReviewControlFindingsJSON(raw string, includeInvocation bool) string {
 	if raw == "" {
 		return raw
 	}
@@ -786,6 +797,10 @@ func dropReviewQuestionFindingsJSON(raw string) string {
 	kept := make([]types.Finding, 0, len(findings.Items))
 	for _, item := range findings.Items {
 		if item.Category == types.FindingCategoryReviewQuestion || item.ID == ReviewQuestionsUnreadableFindingID {
+			continue
+		}
+		if includeInvocation && (item.Category == types.FindingCategoryMCPAuthorization || item.AuthorizationRequired != nil ||
+			item.ID == types.FindingIDReviewAgentIncomplete || item.ID == types.FindingIDReviewAgentUnvalidatedWork) {
 			continue
 		}
 		kept = append(kept, item)

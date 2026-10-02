@@ -55,6 +55,12 @@ type RunOpts struct {
 	// review-fix, test-evidence, ...). The review-role router uses review and
 	// review-fix to select a harness; concrete adapters ignore it.
 	Purpose string
+	// RequiredMCPServers contains only dependencies explicitly pinned for the
+	// active Review/Test stage. Codex uses it to classify authorization failures
+	// from matching MCP tool calls without affecting undeclared servers.
+	RequiredMCPServers []string
+	// ManageMCPAvailability applies the pipeline's opt-in MCP dependency policy.
+	ManageMCPAvailability bool
 	// Round is the 1-based review-loop round this invocation belongs to, or 0
 	// when the caller does not number rounds. The review-role router uses it to
 	// apply an operator-configured later-round role override; concrete adapters

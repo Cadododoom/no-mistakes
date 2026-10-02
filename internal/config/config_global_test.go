@@ -11,6 +11,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestBoundAgentInvocationTimeoutCapsAtEightHours(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configured time.Duration
+		fallback   time.Duration
+		want       time.Duration
+	}{
+		{name: "default fallback", fallback: 30 * time.Minute, want: 30 * time.Minute},
+		{name: "configured short budget", configured: 2 * time.Hour, fallback: 8 * time.Hour, want: 2 * time.Hour},
+		{name: "configured over ceiling", configured: 12 * time.Hour, fallback: 8 * time.Hour, want: MaxAgentInvocationTimeout},
+		{name: "fallback over ceiling", fallback: 12 * time.Hour, want: MaxAgentInvocationTimeout},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := BoundAgentInvocationTimeout(test.configured, test.fallback); got != test.want {
+				t.Fatalf("BoundAgentInvocationTimeout(%s, %s) = %s, want %s", test.configured, test.fallback, got, test.want)
+			}
+		})
+	}
+}
+
 func TestLoadGlobal_Defaults(t *testing.T) {
 	// Non-existent file should return defaults
 	cfg, err := LoadGlobal("/nonexistent/config.yaml")

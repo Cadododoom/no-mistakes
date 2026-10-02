@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 	"unicode"
@@ -17,13 +18,16 @@ import (
 )
 
 // ReviewStep reviews the diff for bugs, security issues, and doc gaps.
-type ReviewStep struct {
-	now func() time.Time
-}
+type ReviewStep struct{}
 
 func (s *ReviewStep) Name() types.StepName { return types.StepReview }
 
 func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if outcome, parked, err := mcpPreflightOutcome(sctx, types.StepReview); err != nil {
+		return nil, err
+	} else if parked {
+		return outcome, nil
+	}
 	planSection, err := verificationPlanPromptSection(sctx)
 	if err != nil {
 		return nil, err
@@ -129,11 +133,25 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// genuine doubt still leaves the code alone and reports the finding
 	// unresolved.
 	var fixSummary string
-	if sctx.Fixing && !sctx.SkipFixExecution {
-		previousFindings := sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
-		historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + testguidance.Rule
-		fixPrompt := fmt.Sprintf(
-			`Investigate previous review findings and address legitimate ones.
+	if sctx.Fixing && !sctx.SkipFixExecution && onlyMCPAuthorizationFindings(sctx.PreviousFindings) {
+		sctx.Log("retrying Review without a repair turn after MCP authorization; re-probing before agent work...")
+		fixSummary = NoChangesAppliedSummary
+	} else if sctx.Fixing && !sctx.SkipFixExecution {
+		if onlyReviewInvocationRecoveryFindings(sctx.PreviousFindings) {
+			// A timeout/exit finding asks for a fresh Review attempt, not a code
+			// repair. Preserve partial work from the interrupted invocation using
+			// the ordinary protected-path and custody checks before rereviewing.
+			sctx.Log("retrying Review without a repair turn; preserving interrupted work...")
+			committed, err := commitAgentFixesWithResult(sctx, s.Name(), "resume interrupted review", "resume review")
+			if err != nil {
+				return nil, err
+			}
+			fixSummary = fixResultSummary(committed)
+		} else {
+			previousFindings := sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
+			historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + testguidance.Rule
+			fixPrompt := fmt.Sprintf(
+				`Investigate previous review findings and address legitimate ones.
 
 Examine the relevant code yourself and apply fixes directly.
 
@@ -162,33 +180,41 @@ Rules:
 
 Previous review findings to address:
 %s`,
-			branch,
-			baseSHA,
-			sctx.Run.HeadSHA,
-			reviewScope,
-			baseBranch,
-			ignorePatterns,
-			historySection,
-			previousFindings,
-		)
-		// Every logical agent turn owns a fresh stall budget. The fixer keeps
-		// the step parent for synchronous preparation and commit work, so the
-		// independent rereviewer cannot inherit its spent deadline.
-		summary, err := s.executeReviewFixWithTimeout(sctx, s.Name(), fixExecutionOptions{
-			RequirePreviousFindings: true,
-			MissingFindingsError:    "review fix requires previous review findings",
-			LogMessage:              "asking agent to fix identified issues...",
-			Prompt:                  fixPrompt,
-			ErrorPrefix:             "agent fix",
-			FallbackSummary:         "address review findings",
-			SessionRole:             pipeline.SessionRoleFixer,
-			Purpose:                 "review-fix",
-			Workload:                workload,
-		})
-		if err != nil {
-			return nil, err
+				branch,
+				baseSHA,
+				sctx.Run.HeadSHA,
+				reviewScope,
+				baseBranch,
+				ignorePatterns,
+				historySection,
+				previousFindings,
+			)
+			// Every logical agent turn owns a fresh invocation budget. The
+			// fixer keeps the step parent for synchronous preparation and commit
+			// work, so the independent rereviewer cannot inherit its spent
+			// deadline.
+			summary, err := s.executeReviewFixWithTimeout(sctx, s.Name(), fixExecutionOptions{
+				RequirePreviousFindings: true,
+				MissingFindingsError:    "review fix requires previous review findings",
+				LogMessage:              "asking agent to fix identified issues...",
+				Prompt:                  fixPrompt,
+				ErrorPrefix:             "agent fix",
+				FallbackSummary:         "address review findings",
+				SessionRole:             pipeline.SessionRoleFixer,
+				Purpose:                 "review-fix",
+				Workload:                workload,
+			})
+			if err != nil {
+				if status, ok := mcpAuthorizationStatusFromError(err); ok {
+					return mcpAuthorizationOutcome(sctx, s.Name(), status, true), nil
+				}
+				if recoverableReviewInvocationError(err) {
+					return reviewInvocationRecoveryOutcome(sctx, err), nil
+				}
+				return nil, err
+			}
+			fixSummary = summary
 		}
-		fixSummary = summary
 	}
 	reviewTargetSHA := sctx.Run.HeadSHA
 
@@ -467,6 +493,12 @@ Risk assessment (after listing all findings):
 				break
 			}
 		} else if !agent.IsStructuredOutputRejected(err) || sctx.Ctx.Err() != nil || errors.Is(err, errReviewAgentTimeout) {
+			if status, ok := mcpAuthorizationStatusFromError(err); ok {
+				return mcpAuthorizationOutcome(sctx, s.Name(), status, true), nil
+			}
+			if recoverableReviewInvocationError(err) {
+				return reviewInvocationRecoveryOutcome(sctx, err), nil
+			}
 			return nil, err
 		}
 		validationErrors = append(validationErrors, err)
@@ -523,6 +555,12 @@ Risk assessment (after listing all findings):
 		// remainder named, so a partial or fabricated record never approves.
 		completed, err := s.completeCoverageGaps(sctx, turnPrompt, sessionRole, opts, findings, reviewable, askDir)
 		if err != nil {
+			if status, ok := mcpAuthorizationStatusFromError(err); ok {
+				return mcpAuthorizationOutcome(sctx, s.Name(), status, true), nil
+			}
+			if recoverableReviewInvocationError(err) {
+				return reviewInvocationRecoveryOutcome(sctx, err), nil
+			}
 			return nil, err
 		}
 		findings = completed
@@ -660,6 +698,9 @@ func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt
 	completionOpts.Purpose = "review-coverage"
 	result, err := s.runReviewAgent(sctx, "agent review coverage", role, completionOpts)
 	if err != nil {
+		if recoverableReviewInvocationError(err) {
+			return findings, err
+		}
 		sctx.Log(fmt.Sprintf("focused coverage pass failed (%s); parking on the incomplete coverage record", strings.ReplaceAll(err.Error(), "\n", "; ")))
 		return findings, nil
 	}
@@ -972,7 +1013,7 @@ func (s *ReviewStep) runReviewAgent(sctx *pipeline.StepContext, prefix string, r
 
 func reviewAgentTimeout(cfg *config.Config) time.Duration {
 	if cfg != nil && cfg.ReviewAgentTimeout > 0 {
-		return cfg.ReviewAgentTimeout
+		return config.BoundAgentInvocationTimeout(cfg.ReviewAgentTimeout, config.DefaultReviewAgentTimeout)
 	}
 	return config.DefaultReviewAgentTimeout
 }
@@ -994,6 +1035,75 @@ func reviewAgentError(timeout time.Duration, prefix string, err error) error {
 		return fmt.Errorf("%s reached its invocation budget %s: %w", prefix, pipeline.AgentBudgetBound(err, timeout), err)
 	}
 	return fmt.Errorf("%s: %w", prefix, err)
+}
+
+func recoverableReviewInvocationError(err error) bool {
+	if errors.Is(err, errReviewAgentTimeout) {
+		return true
+	}
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
+}
+
+func onlyReviewInvocationRecoveryFindings(raw string) bool {
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil || len(findings.Items) == 0 {
+		return false
+	}
+	for _, item := range findings.Items {
+		if item.ID != types.FindingIDReviewAgentIncomplete && item.ID != types.FindingIDReviewAgentUnvalidatedWork {
+			return false
+		}
+	}
+	return true
+}
+
+func reviewInvocationRecoveryOutcome(sctx *pipeline.StepContext, err error) *pipeline.StepOutcome {
+	evidence := reviewInvocationFailureSummary(err)
+	items := []types.Finding{{
+		ID:          types.FindingIDReviewAgentIncomplete,
+		Severity:    types.FindingSeverityWarning,
+		Action:      types.ActionAskUser,
+		Description: fmt.Sprintf("The Review agent invocation did not complete, so this head is not review-certified. Evidence: %s. Respond with fix to retry Review, or abort the run.", evidence),
+	}}
+	if sctx != nil && sctx.Run != nil && sctx.WorkDir != "" {
+		head, headErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+		status, statusErr := git.Run(sctx.Ctx, sctx.WorkDir, "status", "--porcelain")
+		if (headErr == nil && head != sctx.Run.HeadSHA) || (statusErr == nil && strings.TrimSpace(status) != "") {
+			items = append(items, types.Finding{
+				ID:          types.FindingIDReviewAgentUnvalidatedWork,
+				Severity:    types.FindingSeverityError,
+				Action:      types.ActionAskUser,
+				Description: "The interrupted Review invocation left committed or uncommitted work that no complete Review turn certified. Respond with fix to preserve and review it, or abort the run.",
+			})
+		}
+	}
+	payload, _ := types.MarshalFindingsJSON(types.Findings{Items: items, Summary: "Review agent invocation incomplete"})
+	if sctx != nil && sctx.Log != nil {
+		sctx.Log("Review did not complete; preserving the run worktree for retry (see elapsed time, process, and last-activity status)")
+	}
+	return &pipeline.StepOutcome{NeedsApproval: true, Findings: payload}
+}
+
+func reviewInvocationFailureSummary(err error) string {
+	if errors.Is(err, errReviewAgentTimeout) {
+		// The shared agent runner includes measured process/activity details in
+		// its timeout error. Keep those details, but omit the adapter's free-form
+		// report so server output or credentials cannot enter a gate finding.
+		detail := strings.TrimSpace(err.Error())
+		if report := strings.Index(detail, "; agent reported:"); report >= 0 {
+			detail = strings.TrimSpace(detail[:report])
+		}
+		if detail != "" {
+			return detail
+		}
+		return "invocation reached the configured time limit; see active-step timing and process details"
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return fmt.Sprintf("agent process exited with status %d", exitErr.ExitCode())
+	}
+	return "agent invocation ended before the review pass completed"
 }
 
 // withdrawnFindings is the answer round's retraction list. A blank id is

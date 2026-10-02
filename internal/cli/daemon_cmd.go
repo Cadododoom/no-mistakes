@@ -137,6 +137,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			requiredMCP, err := parseMCPRequirementPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			reconciledPreviousHead, err := parseReconciledPreviousHeadPushOptions(pushOptions)
 			if err != nil {
 				return err
@@ -177,6 +181,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				OmitIntent:             omitIntent,
 				PiProfile:              piProfile,
 				VerificationPlanID:     verificationPlanID,
+				RequiredMCP:            requiredMCP,
 				ReconciledPreviousHead: reconciledPreviousHead,
 				ClosingIssueRefs:       closingIssues,
 			}, &result)

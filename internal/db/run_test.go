@@ -386,6 +386,42 @@ func TestInsertRunWithIntent(t *testing.T) {
 	}
 }
 
+func TestRunMCPRequirementsPersistOnTheRun(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirements := []types.MCPRequirement{
+		{Stage: types.StepTest, Server: "cloudflare"},
+		{Stage: types.StepReview, Server: "cloudflare"},
+	}
+	run, err := d.InsertRunWithIntentAndLaunchNonceAndMCP(repo.ID, "feature", "head", "base", nil, "", "", "", "", false, nil, requirements)
+	if err != nil {
+		t.Fatalf("insert run with MCP requirements: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	stored, err := got.MCPRequirements()
+	if err != nil {
+		t.Fatalf("decode stored MCP requirements: %v", err)
+	}
+	want := []types.MCPRequirement{
+		{Stage: types.StepReview, Server: "cloudflare"},
+		{Stage: types.StepTest, Server: "cloudflare"},
+	}
+	if len(stored) != len(want) {
+		t.Fatalf("stored requirements = %+v, want %+v", stored, want)
+	}
+	for i := range want {
+		if stored[i] != want[i] {
+			t.Fatalf("stored requirements = %+v, want %+v", stored, want)
+		}
+	}
+}
+
 func TestLaunchNonceBindingClaimsOnceAndPreservesLegacyRows(t *testing.T) {
 	d := openTestDB(t)
 	repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

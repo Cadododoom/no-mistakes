@@ -33,6 +33,7 @@ const (
 	MethodHealth                    = "health"
 	MethodShutdown                  = "shutdown"
 	MethodUpdateRunClosingIssueRefs = "update_run_closing_issue_refs"
+	MethodProbeMCPReadiness = "probe_mcp_readiness"
 )
 
 // JSON-RPC 2.0 error codes.
@@ -77,8 +78,9 @@ func (e *RPCError) Error() string { return e.Message }
 // intent from local transcripts. LaunchNonce and ValidationGeneration together
 // opt into a nonce-bound launch proof.
 type PushReceivedParams struct {
-	VerificationPlanID string              `json:"verification_plan_id,omitempty"`
-	PiProfile          *agentcfg.PiProfile `json:"pi_profile,omitempty"`
+	VerificationPlanID string                 `json:"verification_plan_id,omitempty"`
+	PiProfile          *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
+	RequiredMCP        []types.MCPRequirement `json:"required_mcp,omitempty"`
 	// Gate is the absolute path to the gate bare repo.
 	Gate                 string           `json:"gate"`
 	Ref                  string           `json:"ref"`
@@ -107,8 +109,9 @@ type PushReceivedParams struct {
 // branch head. The daemon checks the gate while holding the branch lock, so a
 // caller never receives a proof for a drifting creation context.
 type StartFreshRunParams struct {
-	VerificationPlanID string              `json:"verification_plan_id,omitempty"`
-	PiProfile          *agentcfg.PiProfile `json:"pi_profile,omitempty"`
+	VerificationPlanID string                 `json:"verification_plan_id,omitempty"`
+	PiProfile          *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
+	RequiredMCP        []types.MCPRequirement `json:"required_mcp,omitempty"`
 
 	RepoID               string           `json:"repo_id"`
 	Branch               string           `json:"branch"`
@@ -152,10 +155,17 @@ type ProbeOmitIntentResult struct {
 	OK bool `json:"ok"`
 }
 
+// ProbeMCPReadinessResult prevents a newer client from launching declared
+// dependencies through an older daemon that silently drops unknown fields.
+type ProbeMCPReadinessResult struct {
+	OK bool `json:"ok"`
+}
+
 // ClaimLaunchReceiptParams identifies one exact opaque receipt binding.
 // Generic run/status surfaces never expose launch bindings or intent digests.
 type ClaimLaunchReceiptParams struct {
-	PiProfile *agentcfg.PiProfile `json:"pi_profile,omitempty"`
+	PiProfile   *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
+	RequiredMCP []types.MCPRequirement `json:"required_mcp,omitempty"`
 
 	RepoID               string `json:"repo_id"`
 	Branch               string `json:"branch"`
@@ -218,8 +228,9 @@ type GetActiveRunParams struct {
 // leaves the new run to perform fresh inference.
 // ClosingIssueRefs are merged with the selected run's persisted references.
 type RerunParams struct {
-	VerificationPlanID string              `json:"verification_plan_id,omitempty"`
-	PiProfile          *agentcfg.PiProfile `json:"pi_profile,omitempty"`
+	VerificationPlanID string                 `json:"verification_plan_id,omitempty"`
+	PiProfile          *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
+	RequiredMCP        []types.MCPRequirement `json:"required_mcp,omitempty"`
 
 	RepoID        string           `json:"repo_id"`
 	Branch        string           `json:"branch"`
@@ -437,6 +448,7 @@ type ShutdownResult struct {
 type RunInfo struct {
 	VerificationPlan *verificationplan.Snapshot `json:"verification_plan"`
 	PiProfile        *agentcfg.PiProfile        `json:"pi_profile,omitempty"`
+	RequiredMCP      []types.MCPRequirement     `json:"required_mcp,omitempty"`
 
 	ID               string          `json:"id"`
 	RepoID           string          `json:"repo_id"`
