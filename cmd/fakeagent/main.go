@@ -30,6 +30,10 @@ func main() {
 func run(argv []string) int {
 	name := agentNameFromArgv0(argv[0])
 	args := argv[1:]
+	if name == "codex" && len(args) >= 2 && args[0] == "mcp" && args[1] == "list" {
+		fmt.Println("[]")
+		return 0
+	}
 
 	scenario, err := loadScenario(os.Getenv("FAKEAGENT_SCENARIO"))
 	if err != nil {

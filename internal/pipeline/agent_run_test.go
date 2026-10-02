@@ -653,3 +653,26 @@ func TestExecutor_DirectAgentRunUnderACallerDeadlineRefusesLateWork(t *testing.T
 		t.Fatal("expected the expired caller deadline to fail the run")
 	}
 }
+
+func TestRunAgent_AllInvocationPathsManageMCPAvailability(t *testing.T) {
+	ag := &hangingAgent{name: "mcp-options", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !opts.ManageMCPAvailability {
+			t.Fatal("pipeline invocation bypassed optional MCP suppression")
+		}
+		return &agent.Result{Text: "ok"}, nil
+	}}
+	sctx := &StepContext{Ctx: context.Background(), Agent: ag}
+	calls := []func() (*agent.Result, error){
+		func() (*agent.Result, error) { return sctx.RunAgent(agent.RunOpts{}) },
+		func() (*agent.Result, error) { return sctx.RunAgentContext(context.Background(), agent.RunOpts{}) },
+		func() (*agent.Result, error) {
+			return sctx.RunAgentSessionContext(context.Background(), SessionRoleFixer, agent.RunOpts{})
+		},
+		func() (*agent.Result, error) { return sctx.RunAgentSession(SessionRoleFixer, agent.RunOpts{}) },
+	}
+	for _, call := range calls {
+		if _, err := call(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

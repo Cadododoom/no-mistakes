@@ -46,13 +46,14 @@ type approvalResponse struct {
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
 type Executor struct {
-	db     *db.DB
-	paths  *paths.Paths
-	config *config.Config
-	forge  *forgecontext.Context
-	agent  agent.Agent
-	steps  []Step
-	skips  map[types.StepName]bool
+	db        *db.DB
+	paths     *paths.Paths
+	config    *config.Config
+	forge     *forgecontext.Context
+	mcpProber MCPReadinessProber
+	agent     agent.Agent
+	steps     []Step
+	skips     map[types.StepName]bool
 
 	onEvent EventFunc
 
@@ -67,6 +68,7 @@ type Executor struct {
 	waiting                bool                  // true when blocked on approval
 	waitingStep            types.StepName        // which step is currently awaiting approval
 	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	waitingSkipRefusal     string                // non-empty: why Skip is rejected at the waiting gate
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -86,6 +88,14 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 // subprocess in this run. A nil context preserves ambient behavior.
 func (e *Executor) SetForgeContext(ctx *forgecontext.Context) {
 	e.forge = ctx
+}
+
+// SetMCPReadinessProber installs the daemon-context Codex probe used only by
+// explicitly declared stage dependencies.
+func (e *Executor) SetMCPReadinessProber(prober MCPReadinessProber) {
+	e.mu.Lock()
+	e.mcpProber = prober
+	e.mu.Unlock()
 }
 
 // SetSkippedSteps configures steps that should be marked skipped without running.
@@ -202,6 +212,11 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	}
 	if action == types.ActionApprove && e.waitingApprovalRefusal != "" {
 		refusal := e.waitingApprovalRefusal
+		e.mu.Unlock()
+		return errors.New(refusal)
+	}
+	if action == types.ActionSkip && e.waitingSkipRefusal != "" {
+		refusal := e.waitingSkipRefusal
 		e.mu.Unlock()
 		return errors.New(refusal)
 	}
@@ -510,6 +525,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
+	e.waitingSkipRefusal = skipRefusal(gate.step.Name(), gate.findings)
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -523,6 +539,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	)
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
+	if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+		return ErrDaemonShutdown
+	}
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
@@ -1043,6 +1062,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		WorkDir:           workDir,
 		GateDir:           e.paths.RepoDir(repo.ID),
 		Agent:             stepAgent,
+		StepName:          stepName,
+		MCPProber:         e.mcpProber,
 		Config:            e.config,
 		ForgeContext:      e.forge,
 		DB:                e.db,
@@ -1111,6 +1132,9 @@ rounds:
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
 		outcome, err := step.Execute(sctx)
+		if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+			return false, "", ErrDaemonShutdown
+		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -1166,8 +1190,8 @@ rounds:
 			// file instead poisons that path in reportedFiles. Either way an
 			// answered-and-verified finding would stay outstanding for a reason
 			// that has nothing to do with it.
-			verificationFindings := dropReviewQuestionFindingsJSON(roundFindings)
-			outstandingFindings = dropReviewQuestionFindingsJSON(outstandingFindings)
+			verificationFindings := dropReviewControlFindingsJSON(roundFindings)
+			outstandingFindings = dropReviewControlFindingsJSON(outstandingFindings)
 			// An answer round retracts by naming ids, never by silence - and
 			// ONLY an answer round. A fix round is held to the coverage rule,
 			// so a retraction it claimed would clear a selected finding no
@@ -1310,6 +1334,7 @@ rounds:
 			e.waiting = true
 			e.waitingStep = stepName
 			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
+			e.waitingSkipRefusal = skipRefusal(stepName, effectiveFindings)
 			e.mu.Unlock()
 
 			// Parking starts before the gate becomes observable. This includes the
@@ -1325,12 +1350,17 @@ rounds:
 				e.mu.Lock()
 				e.waiting = false
 				e.waitingStep = ""
+				e.waitingApprovalRefusal = ""
+				e.waitingSkipRefusal = ""
 				e.mu.Unlock()
 				return false, "", fmt.Errorf("persist %s approval gate: %w", stepName, dbErr)
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
+			if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+				return false, "", ErrDaemonShutdown
+			}
 			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 			}
@@ -1727,6 +1757,8 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		e.mu.Lock()
 		e.waiting = false
 		e.waitingStep = ""
+		e.waitingApprovalRefusal = ""
+		e.waitingSkipRefusal = ""
 		e.mu.Unlock()
 		// Drain any stale response that arrived after context cancellation or
 		// raced with an external reconciliation.
@@ -1807,6 +1839,8 @@ func (e *Executor) claimGateReconciliation() bool {
 	}
 	e.waiting = false
 	e.waitingStep = ""
+	e.waitingApprovalRefusal = ""
+	e.waitingSkipRefusal = ""
 	return true
 }
 
@@ -1852,10 +1886,22 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	return reconciler.ReconcileApprovalGate(&copyCtx)
 }
 
+// ErrDaemonShutdown suspends local execution without resolving a durable gate.
+// Startup recovery decides whether an interrupted executing stage can resume.
+var ErrDaemonShutdown = errors.New("daemon shutting down")
+
 // failRun marks a run as failed and returns the error.
 // It accepts an optional context; if the context was cancelled with a cause,
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
+	if errors.Is(err, ErrDaemonShutdown) {
+		return ErrDaemonShutdown
+	}
+	for _, ctx := range ctxs {
+		if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+			return ErrDaemonShutdown
+		}
+	}
 	errMsg := err.Error()
 	for _, ctx := range ctxs {
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
@@ -2207,7 +2253,7 @@ func answerRoundCarriedFindings(answering bool, outstanding string) string {
 	if !answering {
 		return ""
 	}
-	return dropReviewQuestionFindingsJSON(outstanding)
+	return dropReviewControlFindingsJSON(outstanding)
 }
 
 // ReviewConversationAnswerDir is where an answer for this run may be appended,

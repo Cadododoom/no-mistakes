@@ -568,13 +568,29 @@ func gateFields(gate stepView) []toon.Field {
 			"Have the operator inspect and resolve the reported protected-path edit through the repository's authorized workflow, then run `no-mistakes axi respond --action fix` to retry the refused step, including its commit and publication.",
 		}
 	}
+	if pipeline.HasIncompleteAgentInvocationRefusal(gate.FindingsJSON) {
+		help = []string{
+			fmt.Sprintf("The %s agent did not finish validating this head. Approve and skip are refused.", gate.Name),
+			fmt.Sprintf("Run `no-mistakes axi respond --action fix --findings <ids>` to retry %s with the run worktree preserved, or `no-mistakes axi abort` to stop the run.", gate.Name),
+		}
+	}
+	if authorization := mcpAuthorizationFinding(gate.FindingsJSON); authorization != nil {
+		help = []string{
+			fmt.Sprintf("%s MCP server %s needs authorization for the %s stage in %s. Approve and skip are refused.", authorization.Provider, authorization.Server, authorization.Stage, authorization.ExecutorContext),
+			authorization.NextAction,
+			"After authorizing in the daemon executor's Codex context, run `no-mistakes axi respond --action fix` to re-probe and resume the stage.",
+		}
+	}
 	skip := "Run `no-mistakes axi respond --action skip` to skip this step"
+	if pipeline.HasIncompleteAgentInvocationRefusal(gate.FindingsJSON) || pipeline.HasMCPAuthorizationRefusal(gate.FindingsJSON) {
+		skip = "Skip is refused; retry with fix after resolving the prerequisite, or abort the run."
+	}
 	if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
 		help = []string{
-			"Approve is rejected: the run worktree holds work a timed-out Test agent left that no Test turn validated, and approval would publish it. The findings name that work and how to inspect it.",
+			"Approve is rejected: the run worktree holds interrupted agent work that no complete validation turn certified, and approval would publish it. The findings name that work and how to inspect it.",
 			"Run `no-mistakes axi respond --action fix --findings <ids>` to validate that work (do not edit files yourself), or `no-mistakes axi abort` to stop the run",
 		}
-		skip = "Do not skip this step: the steps after Test would commit and publish the unvalidated work, so skipping needs the operator's explicit decision"
+		skip = "Do not skip this step: skip is refused because it would permit publication of unvalidated work. Retry with fix or abort."
 	}
 	return gateFieldsWithHelp(gate, append(help,
 		skip,
@@ -582,6 +598,19 @@ func gateFields(gate stepView) []toon.Field {
 		"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
 		preserveGateFixCommitsGuidance,
 	))
+}
+
+func mcpAuthorizationFinding(raw string) *types.MCPAuthorizationRequired {
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return nil
+	}
+	for _, finding := range findings.Items {
+		if finding.AuthorizationRequired != nil {
+			return finding.AuthorizationRequired
+		}
+	}
+	return nil
 }
 
 func inspectionOnlyGateFields(gate stepView, runID string) []toon.Field {
@@ -610,6 +639,16 @@ func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed."})
 	}
 	gfields = append(gfields, toon.Field{Key: "findings", Value: findingRows(parsed.Items)})
+	if authorization := mcpAuthorizationFinding(gate.FindingsJSON); authorization != nil {
+		gfields = append(gfields, toon.Field{Key: "authorization_required", Value: toon.NewObject(
+			toon.Field{Key: "provider", Value: authorization.Provider},
+			toon.Field{Key: "server", Value: authorization.Server},
+			toon.Field{Key: "stage", Value: authorization.Stage},
+			toon.Field{Key: "status", Value: authorization.Status},
+			toon.Field{Key: "executor_context", Value: authorization.ExecutorContext},
+			toon.Field{Key: "next_action", Value: authorization.NextAction},
+		)})
+	}
 
 	return []toon.Field{
 		{Key: "gate", Value: toon.NewObject(gfields...)},
