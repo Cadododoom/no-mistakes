@@ -576,9 +576,9 @@ func gateFields(gate stepView) []toon.Field {
 	}
 	if authorization := mcpAuthorizationFinding(gate.FindingsJSON); authorization != nil {
 		help = []string{
-			fmt.Sprintf("%s MCP server %s needs authorization for the %s stage in %s. Approve and skip are refused.", authorization.Provider, authorization.Server, authorization.Stage, authorization.ExecutorContext),
-			authorization.NextAction,
-			"After authorizing in the daemon executor's Codex context, run `no-mistakes axi respond --action fix` to re-probe and resume the stage.",
+			fmt.Sprintf("%s MCP server %s needs authorization for the %s stage in %s. Approve and skip are refused.", authorization.AuthorizationRequired.Provider, authorization.AuthorizationRequired.Server, authorization.AuthorizationRequired.Stage, authorization.AuthorizationRequired.ExecutorContext),
+			authorization.AuthorizationRequired.NextAction,
+			fmt.Sprintf("After authorizing in the daemon executor's Codex context, run `no-mistakes axi respond --action fix --findings %s` to re-probe and resume the stage.", authorization.ID),
 		}
 	}
 	skip := "Run `no-mistakes axi respond --action skip` to skip this step"
@@ -600,14 +600,14 @@ func gateFields(gate stepView) []toon.Field {
 	))
 }
 
-func mcpAuthorizationFinding(raw string) *types.MCPAuthorizationRequired {
+func mcpAuthorizationFinding(raw string) *types.Finding {
 	findings, err := types.ParseFindingsJSON(raw)
 	if err != nil {
 		return nil
 	}
 	for _, finding := range findings.Items {
 		if finding.AuthorizationRequired != nil {
-			return finding.AuthorizationRequired
+			return &finding
 		}
 	}
 	return nil
@@ -641,12 +641,12 @@ func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 	gfields = append(gfields, toon.Field{Key: "findings", Value: findingRows(parsed.Items)})
 	if authorization := mcpAuthorizationFinding(gate.FindingsJSON); authorization != nil {
 		gfields = append(gfields, toon.Field{Key: "authorization_required", Value: toon.NewObject(
-			toon.Field{Key: "provider", Value: authorization.Provider},
-			toon.Field{Key: "server", Value: authorization.Server},
-			toon.Field{Key: "stage", Value: authorization.Stage},
-			toon.Field{Key: "status", Value: authorization.Status},
-			toon.Field{Key: "executor_context", Value: authorization.ExecutorContext},
-			toon.Field{Key: "next_action", Value: authorization.NextAction},
+			toon.Field{Key: "provider", Value: authorization.AuthorizationRequired.Provider},
+			toon.Field{Key: "server", Value: authorization.AuthorizationRequired.Server},
+			toon.Field{Key: "stage", Value: authorization.AuthorizationRequired.Stage},
+			toon.Field{Key: "status", Value: authorization.AuthorizationRequired.Status},
+			toon.Field{Key: "executor_context", Value: authorization.AuthorizationRequired.ExecutorContext},
+			toon.Field{Key: "next_action", Value: authorization.AuthorizationRequired.NextAction},
 		)})
 	}
 

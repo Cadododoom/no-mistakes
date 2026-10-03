@@ -183,14 +183,14 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, err
 	}
- requirements, err := run.MCPRequirements()
- if err == nil {
-  err = agent.ValidateMCPRequirements(ag, requirements)
- }
- if err != nil {
-  _ = ag.Close()
-  return nil, err
- }
+	requirements, err := run.MCPRequirements()
+	if err == nil {
+		err = agent.ValidateMCPRequirements(ag, requirements)
+	}
+	if err != nil {
+		_ = ag.Close()
+		return nil, err
+	}
 	if cfg.SessionReuse {
 		if err := validateRecoveredSessionProviders(m.db, run.ID, ag); err != nil {
 			_ = ag.Close()
@@ -1337,21 +1337,39 @@ func fetchTrustedDefaultBranchSHA(ctx context.Context, gateDir string, repo *db.
 	return sha, nil
 }
 
-// validatePiProfileAgentsBeforeCancel loads the effective trusted repo agent
-// selection (and, when allow_repo_commands is set, the pushed copy) from the
-// gate and runs the same check ValidatePiProfileAgents will run after merge.
-// A trusted default-branch Claude or mixed fallback list must fail here, not
-// after cancelActiveRuns has already stopped a healthy validation.
-func (m *RunManager) validatePiProfileAgentsBeforeCancel(ctx context.Context, repo *db.Repo, headSHA string, globalCfg *config.GlobalConfig) error {
+func (m *RunManager) validateRunAgentsBeforeCancel(ctx context.Context, repo *db.Repo, headSHA string, globalCfg *config.GlobalConfig, pin *agentcfg.PiProfile, requirements []types.MCPRequirement) error {
 	gateDir := m.paths.RepoDir(repo.ID)
 	trustedSHA, err := fetchTrustedDefaultBranchSHA(ctx, gateDir, repo)
 	if err != nil {
 		return err
 	}
-	trustedRepoCfg := loadTrustedRepoConfig(ctx, gateDir, trustedSHA, "")
-	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
-	effective := config.EffectiveRepoConfig(loadRepoConfigAtSHA(ctx, gateDir, headSHA), trustedRepoCfg, allowRepoCommands)
-	return config.MergeForRemote(globalCfg, effective, repo.UpstreamURL).ValidatePiProfileAgents()
+	if err := assertGateTrustedConfigReadable(ctx, gateDir, repo.DefaultBranch, trustedSHA); err != nil {
+		return err
+	}
+	trusted := loadTrustedRepoConfig(ctx, gateDir, trustedSHA, "")
+	effective := config.EffectiveRepoConfig(loadRepoConfigAtSHA(ctx, gateDir, headSHA), trusted, trusted != nil && trusted.AllowRepoCommands)
+	cfg := config.MergeForRemote(globalCfg, effective, repo.UpstreamURL)
+	if pin != nil {
+		if err := cfg.ValidatePiProfileAgents(); err != nil {
+			return err
+		}
+		if err := cfg.ApplyPiProfile(pin); err != nil {
+			return err
+		}
+	}
+	if len(requirements) == 0 {
+		return nil
+	}
+	forgeCtx, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
+	if err != nil {
+		return err
+	}
+	ag, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
+	if err != nil {
+		return err
+	}
+	defer ag.Close()
+	return agent.ValidateMCPRequirements(ag, requirements)
 }
 
 func loadRepoConfigAtSHA(ctx context.Context, dir, sha string) *config.RepoConfig {
@@ -1458,7 +1476,7 @@ func (m *RunManager) startRunWithIntentSourceLockedWithMCP(ctx context.Context, 
 			trackStartFailure("invalid_pi_profile")
 			return "", err
 		}
-		if err := m.validatePiProfileAgentsBeforeCancel(ctx, repo, headSHA, globalCfg); err != nil {
+		if err := m.validateRunAgentsBeforeCancel(ctx, repo, headSHA, globalCfg, pin, requiredMCP); err != nil {
 			trackStartFailure("invalid_pi_profile")
 			return "", err
 		}
@@ -1487,6 +1505,16 @@ func (m *RunManager) startRunWithIntentSourceLockedWithMCP(ctx context.Context, 
 	if err != nil {
 		trackStartFailure("invalid_mcp_requirement")
 		return "", err
+	}
+
+	if len(requiredMCP) > 0 && pin == nil {
+		if globalCfgErr != nil {
+			return "", fmt.Errorf("load global config: %w", globalCfgErr)
+		}
+		if err := m.validateRunAgentsBeforeCancel(ctx, repo, headSHA, globalCfg, pin, requiredMCP); err != nil {
+			trackStartFailure("mcp_adapter_support")
+			return "", err
+		}
 	}
 
 	// Cancel any active run for this repo+branch.
@@ -1701,12 +1729,12 @@ func (m *RunManager) startRunWithIntentSourceLockedWithMCP(ctx context.Context, 
 		return "", err
 	}
 
- if err := agent.ValidateMCPRequirements(ag, requiredMCP); err != nil {
-  _ = ag.Close()
-  m.db.UpdateRunError(run.ID, err.Error())
-  trackStartFailure("mcp_adapter_support")
-  return "", err
- }
+	if err := agent.ValidateMCPRequirements(ag, requiredMCP); err != nil {
+		_ = ag.Close()
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("mcp_adapter_support")
+		return "", err
+	}
 
 	// Configuration decides this run's gates exactly once, here, and the
 	// resolved list is recorded before the executor can write a single step

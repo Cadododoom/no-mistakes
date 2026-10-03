@@ -90,6 +90,9 @@ func TestMCPAuthorizationGateRendersStructuredHandoff(t *testing.T) {
 	if err := toon.Unmarshal([]byte(out), &doc); err != nil {
 		t.Fatalf("decode gate: %v\n%s", err, out)
 	}
+	if !strings.Contains(out, "no-mistakes axi respond --action fix --findings "+types.FindingIDMCPAuthorizationRequired) {
+		t.Fatalf("authorization recovery command omitted finding selection: %s", out)
+	}
 	got := doc.Gate.AuthorizationRequired
 	if got.Provider != "cloudflare" || got.Server != "cloudflare" || got.Stage != "test" || got.Status != types.MCPStatusAuthorizationRequiredDuringProbe || got.ExecutorContext != "daemon CODEX_HOME=/daemon/.codex" || got.NextAction != "CODEX_HOME='/daemon/.codex' codex mcp login cloudflare --no-browser" {
 		t.Fatalf("structured authorization handoff = %+v\n%s", got, out)

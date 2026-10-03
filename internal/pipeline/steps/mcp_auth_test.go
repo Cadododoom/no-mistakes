@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -105,11 +106,11 @@ func TestMCPPreflight_MissingAuthorizationReturnsTypedGate(t *testing.T) {
 		NextAction:      "CODEX_HOME='/daemon/.codex' codex mcp login cloudflare --no-browser",
 	}}
 	var logs []string
- dir, base, head := setupGitRepo(t)
- sctx := newTestContextWithDBRecords(t, nil, dir, base, head, config.Commands{})
- sctx.Run.RequiredMCPJSON = requiredJSON
- sctx.MCPProber = prober
- sctx.Log = func(line string) { logs = append(logs, line) }
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, nil, dir, base, head, config.Commands{})
+	sctx.Run.RequiredMCPJSON = requiredJSON
+	sctx.MCPProber = prober
+	sctx.Log = func(line string) { logs = append(logs, line) }
 
 	outcome, parked, err := mcpPreflightOutcome(sctx, types.StepReview)
 	if err != nil || !parked || outcome == nil || !outcome.NeedsApproval {
@@ -178,8 +179,79 @@ func TestMCPToolAuthorizationFailureHasDistinctTypedOutcome(t *testing.T) {
 	}
 }
 
-type mcpTestAgent struct { *mockAgent }
+type mcpTestAgent struct{ *mockAgent }
 
 func (a *mcpTestAgent) SupportsMCP(server, _ string) bool {
- return server == "cloudflare"
+	return server == "cloudflare"
+}
+
+func TestTestStep_AuthorizedRetryDropsResolvedControls(t *testing.T) {
+	for _, cut := range []string{"timeout", "process-exit"} {
+		for _, selection := range []string{"authorization", "authorization-and-budget", "authorization-and-defect", "deferred-authorization"} {
+			t.Run(cut+"/"+selection, func(t *testing.T) {
+				dir, base, head := setupGitRepo(t)
+				calls := 0
+				ag := &mcpTestAgent{mockAgent: &mockAgent{name: "mcp", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					calls++
+					if opts.Purpose == "test-fix" {
+						if strings.Contains(opts.Prompt, "RESOLVED_AUTH_CONTROL") {
+							t.Fatal("repair received resolved authorization")
+						}
+						return &agent.Result{Output: json.RawMessage(`{"summary":"fix defect"}`)}, nil
+					}
+					if cut == "process-exit" {
+						return nil, &exec.ExitError{}
+					}
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}}}
+				sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+				sctx.Run.RequiredMCPJSON = `[{"stage":"test","server":"cloudflare"}]`
+				prober := &fakeMCPReadinessProber{result: types.MCPProbeResult{Status: types.MCPStatusDeclaredNotAuthorized}}
+				sctx.MCPProber = prober
+				first, err := (&TestStep{}).Execute(sctx)
+				if err != nil || first == nil || !pipeline.HasMCPAuthorizationRefusal(first.Findings) || calls != 0 {
+					t.Fatalf("initial gate=%+v err=%v calls=%d", first, err, calls)
+				}
+				prober.result.Status = types.MCPStatusAuthorized
+				sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+				sctx.Fixing = true
+				findings, err := types.ParseFindingsJSON(first.Findings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				findings.Items[0].Description = "RESOLVED_AUTH_CONTROL"
+				if cut == "process-exit" {
+					findings.Items[0].Category = ""
+				} else {
+					findings.Items[0].AuthorizationRequired = nil
+				}
+				if selection == "authorization-and-budget" {
+					findings.Items = append(findings.Items, Finding{ID: types.FindingIDTestAgentTimeout, Severity: types.FindingSeverityWarning})
+				}
+				if selection == "authorization-and-defect" {
+					findings.Items = append(findings.Items, Finding{ID: "defect", Severity: types.FindingSeverityError, Description: "retained defect"})
+				}
+				sctx.PreviousFindings, _ = types.MarshalFindingsJSON(findings)
+				if selection == "deferred-authorization" {
+					sctx.DeferredFindings = sctx.PreviousFindings
+					sctx.PreviousFindings = `{"findings":[{"id":"test-agent-timeout","severity":"warning"}]}`
+				}
+				outcome, err := (&TestStep{}).Execute(sctx)
+				if err != nil || outcome == nil || !outcome.NeedsApproval {
+					t.Fatalf("retry=%+v err=%v", outcome, err)
+				}
+				expected := 1
+				if selection == "authorization-and-defect" {
+					expected = 2
+				}
+				if calls != expected || pipeline.HasMCPAuthorizationRefusal(outcome.Findings) || strings.Contains(outcome.Findings, "RESOLVED_AUTH_CONTROL") {
+					t.Fatalf("calls=%d findings=%s", calls, outcome.Findings)
+				}
+				if selection == "authorization-and-defect" && !strings.Contains(outcome.Findings, "retained defect") {
+					t.Fatalf("defect lost: %s", outcome.Findings)
+				}
+			})
+		}
+	}
 }

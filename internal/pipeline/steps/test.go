@@ -77,8 +77,8 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if sctx.Fixing && onlyMCPAuthorizationFindings(sctx.PreviousFindings) {
 		sctx.Log("retrying Test without a repair turn after MCP authorization; re-probing before checks...")
 		fixSummary = NoChangesAppliedSummary
-	} else if sctx.Fixing && onlyTestBudgetCutFindings(sctx.PreviousFindings) {
-		sctx.Log("fix selection holds only the Test agent budget cut; re-running validation without a repair turn...")
+	} else if sctx.Fixing && onlyTestValidationControlFindings(sctx.PreviousFindings) {
+		sctx.Log("fix selection holds only Test validation controls; re-running validation without a repair turn...")
 		fixSummary = NoChangesAppliedSummary
 	} else if sctx.Fixing {
 		historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + testguidance.Rule
@@ -688,7 +688,9 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 
 func testAgentProcessExitOutcome(sctx *pipeline.StepContext, err error, startHead string, baseline []Finding, baselineSummary string, exitCode int) *pipeline.StepOutcome {
 	outcome := testAgentTimeoutOutcome(sctx, err, startHead, baseline, baselineSummary, exitCode)
- if errors.Is(err, errTestAgentTimeout) { return outcome }
+	if errors.Is(err, errTestAgentTimeout) {
+		return outcome
+	}
 	findings, parseErr := types.ParseFindingsJSON(outcome.Findings)
 	if parseErr != nil {
 		return outcome
@@ -753,8 +755,8 @@ func answeredTestGate(sctx *pipeline.StepContext) Findings {
 			carried = types.FindingsMetadata(answered)
 			metadataSet = true
 		}
-		for _, item := range answered.Items {
-			if slices.Contains(testBudgetCutIDs, item.ID) || item.Category == types.FindingCategoryTestCommand {
+		for _, item := range testRepairableFindings(answered).Items {
+			if item.Category == types.FindingCategoryTestCommand {
 				continue
 			}
 			item.ID = ""
@@ -769,11 +771,9 @@ func answeredTestGate(sctx *pipeline.StepContext) Findings {
 // own finding can never claim them.
 var testBudgetCutIDs = []string{types.FindingIDTestAgentTimeout, types.FindingIDTestAgentIncomplete, types.FindingIDTestAgentUnvalidatedWork}
 
-// onlyTestBudgetCutFindings reports whether a fix selection holds nothing but
-// a Test budget cut, which leaves the repair turn nothing to repair.
-func onlyTestBudgetCutFindings(raw string) bool {
+func onlyTestValidationControlFindings(raw string) bool {
 	findings, err := types.ParseFindingsJSON(raw)
-	return err == nil && len(findings.Items) > 0 && len(types.ExcludeFindings(findings, testBudgetCutIDs).Items) == 0
+	return err == nil && len(findings.Items) > 0 && len(testRepairableFindings(findings).Items) == 0
 }
 
 // budgetCutGuidanceSection renders the operator's instructions attached to
@@ -803,14 +803,20 @@ func budgetCutGuidanceSection(sctx *pipeline.StepContext) string {
 		strings.Join(guidance, "\n") + "\n"
 }
 
-// testRepairFindings is the fix selection the repair agent is asked to
-// address: everything but the budget-cut findings.
+func testRepairableFindings(findings Findings) Findings {
+	repair := types.ExcludeFindings(findings, testBudgetCutIDs)
+	repair.Items = slices.DeleteFunc(repair.Items, func(item types.Finding) bool {
+		return item.Category == types.FindingCategoryMCPAuthorization || item.AuthorizationRequired != nil
+	})
+	return repair
+}
+
 func testRepairFindings(raw string) string {
 	findings, err := types.ParseFindingsJSON(raw)
 	if err != nil {
 		return raw
 	}
-	repair := types.ExcludeFindings(findings, testBudgetCutIDs)
+	repair := testRepairableFindings(findings)
 	if len(repair.Items) == 0 {
 		return ""
 	}
@@ -820,7 +826,6 @@ func testRepairFindings(raw string) string {
 	}
 	return encoded
 }
-
 
 func porcelainPaths(status string) []string {
 	var paths []string
