@@ -189,7 +189,7 @@ func (a *codexAgent) mcpStageArgs(ctx context.Context, opts RunOpts) ([]string, 
 		return nil, nil
 	}
 	for _, server := range opts.RequiredMCPServers {
-		if strings.EqualFold(server, "cloudflare") {
+		if server == "cloudflare" {
 			return nil, nil
 		}
 	}
@@ -216,7 +216,7 @@ func (a *codexAgent) mcpStageArgs(ctx context.Context, opts RunOpts) ([]string, 
 		return nil, fmt.Errorf("Codex MCP configuration inventory was unreadable; agent was not launched")
 	}
 	for _, server := range servers {
-		if strings.EqualFold(server.Name, "cloudflare") {
+		if server.Name == "cloudflare" {
 			return []string{"-c", "mcp_servers.cloudflare.enabled=false"}, nil
 		}
 	}
@@ -463,8 +463,8 @@ func failedRequiredMCPAuthorization(item *codexItem, required []string) string {
 	}
 	matched := ""
 	for _, server := range required {
-		if strings.EqualFold(server, item.Server) {
-			matched = strings.ToLower(server)
+		if server == "cloudflare" && server == item.Server {
+			matched = server
 			break
 		}
 	}

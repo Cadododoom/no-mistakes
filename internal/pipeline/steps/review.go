@@ -136,17 +136,24 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// genuine doubt still leaves the code alone and reports the finding
 	// unresolved.
 	var fixSummary string
-	if sctx.Fixing && !sctx.SkipFixExecution && onlyMCPAuthorizationFindings(sctx.PreviousFindings) {
-		sctx.Log("retrying Review without a repair turn after MCP authorization; re-probing before agent work...")
-		fixSummary = NoChangesAppliedSummary
-	} else if sctx.Fixing && !sctx.SkipFixExecution {
-		if onlyReviewInvocationRecoveryFindings(sctx.PreviousFindings) {
-			// A timeout/exit finding asks for a fresh Review attempt, not a code
-			// repair. Preserve partial work from the interrupted invocation using
-			// the ordinary protected-path and custody checks before rereviewing.
-			sctx.Log("retrying Review without a repair turn; preserving interrupted work...")
+ if sctx.Fixing && !sctx.SkipFixExecution {
+  if onlyMCPAuthorizationFindings(sctx.PreviousFindings) || onlyReviewInvocationRecoveryFindings(sctx.PreviousFindings) {
+   sctx.Log("retrying Review without a repair turn; preserving interrupted work...")
+   if rebaseInProgress(sctx.Ctx, sctx.WorkDir) || mergeInProgress(sctx.Ctx, sctx.WorkDir) {
+    return nil, fmt.Errorf("cannot prepare interrupted Review work while a rebase or merge is unfinished")
+   }
 			committed, err := commitAgentFixesWithResult(sctx, s.Name(), "resume interrupted review", "resume review")
 			if err != nil {
+    if refusal := pipeline.ProtectedPathOutcome(err); refusal != nil {
+     findings, _ := types.ParseFindingsJSON(refusal.Findings)
+     baseline := interruptedWorkBaseline(sctx)
+     findings.UnvalidatedSinceSHA = baseline
+     if finding := interruptedWorkFinding(sctx, s.Name(), baseline); finding != nil {
+      findings.Items = append(findings.Items, *finding)
+     }
+     refusal.Findings, _ = types.MarshalFindingsJSON(findings)
+     return refusal, nil
+    }
 				return nil, err
 			}
 			fixSummary = fixResultSummary(committed)
@@ -487,6 +494,7 @@ Risk assessment (after listing all findings):
 		Workload:   workload,
 	}
 	var findings Findings
+	var validationErrors []error
 	for attempt := 1; ; attempt++ {
 		result, err := s.runReviewAgent(sctx, "agent review", sessionRole, opts)
 		if err == nil {
@@ -503,7 +511,11 @@ Risk assessment (after listing all findings):
 			}
 			return nil, err
 		}
+		validationErrors = append(validationErrors, err)
 		if attempt == reviewAnalyzerMaxAttempts {
+			if summary := distinctReviewValidationFailures(validationErrors); summary != "" {
+				return nil, fmt.Errorf("validate review analyzer findings after %d attempts: output kept failing validation across distinct fields (%s): %sattempt %d: %w", reviewAnalyzerMaxAttempts, summary, reviewValidationAttempts(validationErrors[:attempt-1]), attempt, err)
+			}
 			return nil, fmt.Errorf("validate review analyzer findings after %d attempts: %w", reviewAnalyzerMaxAttempts, err)
 		}
 		sctx.Log(fmt.Sprintf("review analyzer findings rejected (%s); rerunning the review (attempt %d of %d)", strings.ReplaceAll(err.Error(), "\n", "; "), attempt+1, reviewAnalyzerMaxAttempts))
@@ -696,7 +708,7 @@ func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt
 	completionOpts.Purpose = "review-coverage"
 	result, err := s.runReviewAgent(sctx, "agent review coverage", role, completionOpts)
 	if err != nil {
-		if recoverableReviewInvocationError(err) {
+		if agent.IsMCPAuthorizationError(err) || recoverableReviewInvocationError(err) {
 			return findings, err
 		}
 		sctx.Log(fmt.Sprintf("focused coverage pass failed (%s); parking on the incomplete coverage record", strings.ReplaceAll(err.Error(), "\n", "; ")))
@@ -842,6 +854,34 @@ func parseReviewAnalyzerOutput(result *agent.Result) (Findings, error) {
 	return findings, nil
 }
 
+func distinctReviewValidationFailures(failures []error) string {
+	fields := make([]string, 0, len(failures))
+	seen := make(map[string]struct{}, len(failures))
+	for _, failure := range failures {
+		var violation *agent.SchemaViolation
+		if !errors.As(failure, &violation) || violation.Field == "" {
+			continue
+		}
+		if _, ok := seen[violation.Field]; ok {
+			continue
+		}
+		seen[violation.Field] = struct{}{}
+		fields = append(fields, violation.Field)
+	}
+	if len(fields) < 2 {
+		return ""
+	}
+	return strings.Join(fields, ", ")
+}
+
+func reviewValidationAttempts(failures []error) string {
+	var attempts strings.Builder
+	for i, failure := range failures {
+		fmt.Fprintf(&attempts, "attempt %d: %s; ", i+1, strings.ReplaceAll(failure.Error(), "\n", "; "))
+	}
+	return attempts.String()
+}
+
 // reviewRetryNote is the only thing a rerun review learns from the attempt
 // before it: the validation error, framed as data.
 func reviewRetryNote(err error) string {
@@ -983,9 +1023,9 @@ func (s *ReviewStep) runReviewAgent(sctx *pipeline.StepContext, prefix string, r
 }
 
 func (s *ReviewStep) reviewAgentContext(parent context.Context, cfg *config.Config) (context.Context, context.CancelFunc, time.Duration) {
-	timeout := config.BoundAgentInvocationTimeout(0, config.DefaultReviewAgentTimeout)
+	timeout := config.DefaultReviewAgentTimeout
 	if cfg != nil && cfg.ReviewAgentTimeout > 0 {
-		timeout = config.BoundAgentInvocationTimeout(cfg.ReviewAgentTimeout, config.DefaultReviewAgentTimeout)
+		timeout = cfg.ReviewAgentTimeout
 	}
 	now := time.Now()
 	if s != nil && s.now != nil {
@@ -1036,19 +1076,14 @@ func reviewInvocationRecoveryOutcome(sctx *pipeline.StepContext, err error) *pip
 		Action:      types.ActionAskUser,
 		Description: fmt.Sprintf("The Review agent invocation did not complete, so this head is not review-certified. Evidence: %s. Respond with fix to retry Review, or abort the run.", evidence),
 	}}
-	if sctx != nil && sctx.Run != nil && sctx.WorkDir != "" {
-		head, headErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
-		status, statusErr := git.Run(sctx.Ctx, sctx.WorkDir, "status", "--porcelain")
-		if (headErr == nil && head != sctx.Run.HeadSHA) || (statusErr == nil && strings.TrimSpace(status) != "") {
-			items = append(items, types.Finding{
-				ID:          types.FindingIDReviewAgentUnvalidatedWork,
-				Severity:    types.FindingSeverityError,
-				Action:      types.ActionAskUser,
-				Description: "The interrupted Review invocation left committed or uncommitted work that no complete Review turn certified. Respond with fix to preserve and review it, or abort the run.",
-			})
-		}
-	}
-	payload, _ := types.MarshalFindingsJSON(types.Findings{Items: items, Summary: "Review agent invocation incomplete"})
+ baseline := ""
+ if sctx != nil && sctx.Run != nil && sctx.WorkDir != "" {
+  baseline = interruptedWorkBaseline(sctx)
+  if finding := interruptedWorkFinding(sctx, types.StepReview, baseline); finding != nil {
+   items = append(items, *finding)
+  }
+ }
+	payload, _ := types.MarshalFindingsJSON(types.Findings{Items: items, Summary: "Review agent invocation incomplete", UnvalidatedSinceSHA: baseline})
 	if sctx != nil && sctx.Log != nil {
 		sctx.Log("Review did not complete; preserving the run worktree for retry (see elapsed time, process, and last-activity status)")
 	}

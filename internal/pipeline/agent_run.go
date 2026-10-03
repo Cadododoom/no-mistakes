@@ -19,12 +19,12 @@ import (
 var ErrAgentTimeout = errors.New("agent timeout")
 
 // AgentTimeout is the per-invocation budget applied at the shared agent-run
-// seam. A positive Config.AgentTimeout wins up to the 8h recovery ceiling.
+// seam. A positive Config.AgentTimeout wins when configured.
 func AgentTimeout(cfg *config.Config) time.Duration {
 	if cfg != nil && cfg.AgentTimeout > 0 {
-		return config.BoundAgentInvocationTimeout(cfg.AgentTimeout, config.DefaultAgentTimeout)
+		return cfg.AgentTimeout
 	}
-	return config.BoundAgentInvocationTimeout(0, config.DefaultAgentTimeout)
+	return config.DefaultAgentTimeout
 }
 
 // RunAgent executes one agent invocation with a deadline scoped only to that
@@ -74,6 +74,9 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 			}
 		}
 	}
+ if err := agent.RequireMCPServers(ag, opts.RequiredMCPServers, opts.Purpose); err != nil {
+  return nil, err
+ }
 	activity := observeAgentActivity(&opts)
 	return invokeAgent(parent, timeout, activity, func(ctx context.Context) (*agent.Result, error) {
 		if sessionRole != "" && sctx != nil && sctx.Sessions != nil {
@@ -382,4 +385,8 @@ func (a *timeoutAgent) ReportsAgentAttempts() bool {
 
 func (a *timeoutAgent) NeutralizesGateInstructions() bool {
 	return agent.NeutralizesGateInstructions(a.inner)
+}
+
+func (a *timeoutAgent) SupportsMCP(server, purpose string) bool {
+ return agent.SupportsMCP(a.inner, server, purpose)
 }

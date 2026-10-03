@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+ "github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -675,4 +676,63 @@ func TestRunAgent_AllInvocationPathsManageMCPAvailability(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func TestRunAgent_RequiredMCPRefusesUnsupportedInvocationPaths(t *testing.T) {
+ calls := 0
+ ag := &hangingAgent{name: "codex", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+  calls++
+  return &agent.Result{Text: "should not run"}, nil
+ }}
+ sctx := &StepContext{Ctx: context.Background(), Agent: ag, StepName: types.StepReview, Run: &db.Run{RequiredMCPJSON: `[{"stage":"review","server":"cloudflare"}]`}}
+ invocations := []func() (*agent.Result, error){
+  func() (*agent.Result, error) { return sctx.RunAgent(agent.RunOpts{Purpose: "review"}) },
+  func() (*agent.Result, error) { return sctx.RunAgentContext(context.Background(), agent.RunOpts{Purpose: "review-coverage"}) },
+  func() (*agent.Result, error) { return sctx.RunAgentSessionContext(context.Background(), SessionRoleFixer, agent.RunOpts{Purpose: "review-fix"}) },
+  func() (*agent.Result, error) { return sctx.RunAgentSession(SessionRoleFixer, agent.RunOpts{Purpose: "review-fix"}) },
+ }
+ for _, invoke := range invocations {
+  if _, err := invoke(); err == nil { t.Fatal("unsupported adapter dispatched a required MCP turn") }
+ }
+ if calls != 0 { t.Fatalf("unsupported invocations ran %d times", calls) }
+}
+
+type mcpSupportingInvocationAgent struct { *hangingAgent }
+
+func (a *mcpSupportingInvocationAgent) SupportsMCP(server, _ string) bool { return server == "cloudflare" }
+
+func TestRunAgent_RequiredMCPSurvivesExecutorWrappers(t *testing.T) {
+ database, p, run, repo := setupTest(t)
+ run.RequiredMCPJSON = `[{"stage":"review","server":"cloudflare"}]`
+ calls := 0
+ ag := &mcpSupportingInvocationAgent{hangingAgent: &hangingAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+  calls++
+  if len(opts.RequiredMCPServers) != 1 || opts.RequiredMCPServers[0] != "cloudflare" { t.Fatalf("required dependencies=%v", opts.RequiredMCPServers) }
+  return &agent.Result{Text: "ok"}, nil
+ }}}
+ step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+  if _, err := sctx.RunAgent(agent.RunOpts{Purpose: "review"}); err != nil { return nil, err }
+  if _, err := sctx.RunAgentSession(SessionRoleFixer, agent.RunOpts{Purpose: "review-fix"}); err != nil { return nil, err }
+  return &StepOutcome{}, nil
+ }}
+ executor := NewExecutor(database, p, nil, ag, []Step{step}, nil)
+ executor.SetMCPReadinessProber(launchMCPProber{fn: func(context.Context, string, string) (types.MCPProbeResult, error) {
+  return types.MCPProbeResult{Status: types.MCPStatusAuthorized}, nil
+ }})
+ if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil { t.Fatal(err) }
+ if calls != 2 { t.Fatalf("authorized invocations=%d", calls) }
+}
+
+func TestRunAgent_HonorsLongConfiguredInvocationBudget(t *testing.T) {
+ for _, duration := range []time.Duration{2*time.Hour, 12*time.Hour} {
+  started := time.Now()
+  ag := &hangingAgent{name: "budget", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+   deadline, ok := ctx.Deadline()
+   remaining := deadline.Sub(started)
+   if !ok || remaining < duration || remaining > duration+time.Second { t.Fatalf("deadline=%s want budget=%s", remaining, duration) }
+   return &agent.Result{Text: "done"}, nil
+  }}
+  sctx := &StepContext{Ctx: context.Background(), Agent: ag, Config: &config.Config{AgentTimeout: duration}}
+  if _, err := sctx.RunAgent(agent.RunOpts{}); err != nil { t.Fatal(err) }
+ }
 }

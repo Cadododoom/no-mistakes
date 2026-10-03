@@ -551,14 +551,14 @@ For older active runs that do not yet have activity rows, AXI falls back to the 
 
 Maximum wall-clock time for one pipeline agent invocation that does not already have a more specific deadline.
 This is the default-by-construction budget: Document, Lint, Rebase conflict repair, PR drafting, CI auto-fix, and any future agent-spawning step are bounded even if they forget to install their own timer.
-Review still uses [`review_agent_timeout`](#review_agent_timeout) for each review or fix invocation, Test still uses [`test_agent_timeout`](#test_agent_timeout) per invocation, and Intent keeps its five-minute extraction cap. Every agent invocation is capped at eight hours; a larger configured duration is bounded to that ceiling.
+Review still uses [`review_agent_timeout`](#review_agent_timeout) for each review or fix invocation, Test still uses [`test_agent_timeout`](#test_agent_timeout) per invocation, and Intent keeps its five-minute extraction cap. Each invocation honors its configured positive duration; the default is eight hours.
 When this deadline expires, the agent is cancelled and the invocation returns a timeout diagnostic instead of remaining active indefinitely. Most agent-driven mutation steps fail the run, CI auto-fix parks for a user decision, and PR drafting follows its existing agent-error fallback and continues with deterministic content. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the approval behavior.
 A late successful return after the deadline is rejected, so post-agent commits and PR content cannot use work from a timed-out turn.
 
 The diagnostic identifies expiration as an **absolute wall-clock limit** and separately reports what activity was actually measured. Activity does not reset or extend the hard limit. Evidence resets whenever a retry or fallback starts a replacement attempt, including provider fallback, failed session resume, and OpenCode's prompt-only structured-output fallback, so the diagnostic describes only the attempt that reached the deadline:
 
 - `agent produced no output at all in 8h0m0s after its subprocess started (pid=1234)` - the current attempt launched and then emitted nothing. Check that the agent CLI is authenticated and responsive.
-- `agent last produced output 4s ago (312 observed)` - the current attempt was working right up to the deadline. Retry the stage or abort it; the invocation ceiling is eight hours.
+- `agent last produced output 4s ago (312 observed)` - the current attempt was working right up to the deadline. Retry the stage or abort it; the configured invocation budget determines its deadline.
 - `agent produced no output at all in 8h0m0s and never reported a subprocess start` - the current attempt never reached a running agent process.
 
 Output means anything observable: streamed assistant text, or raw bytes on the agent subprocess's stdout or stderr. Subprocess bytes matter because an agent spends most of a long turn running tools rather than writing prose, so prose alone cannot tell a working agent from a wedged one.
@@ -570,7 +570,7 @@ Any substantive report from the agent adapter - for a native agent, its exit sta
 | Type    | `string` (Go duration) |
 | Default | `8h`                   |
 
-Accepts any positive Go `time.ParseDuration` string up to eight hours: `5m`, `30m`, `1h`, `8h`, etc. Larger values are capped at `8h`.
+Accepts any positive Go `time.ParseDuration` string: `5m`, `30m`, `8h`, `12h`, etc. Explicit durations above eight hours are honored.
 Non-positive values are rejected when loading the global config.
 This setting applies to other agent-driven steps. Review and Test have their own per-invocation recovery gates below.
 It is global-only: repository config and environment variables cannot override it.
@@ -579,14 +579,14 @@ It is global-only: repository config and environment variables cannot override i
 
 Maximum wall-clock time for **one** Review-step agent invocation.
 The optional fixer gets the full configured limit, and its fresh, session-free independent rereviewer gets a new full limit of its own. Every later fixer and rereviewer does the same; no invocation inherits time spent by an earlier turn.
-The default is eight hours and no configured value can exceed that recovery ceiling. If an invocation reaches it, or its process exits before returning a complete review, Review parks with measured activity or process-exit evidence. The worktree remains owned by the run; approval and skip are refused, and `fix` retries Review without a repair turn so interrupted changes receive a complete review before publication. Abort remains available; interrupted unvalidated work is retained for inspection even after cancellation and daemon startup cleanup.
+The default is eight hours; explicitly configured longer budgets are honored. If an invocation reaches its configured deadline, or its process exits before returning a complete review, Review parks with measured activity or process-exit evidence. The worktree remains owned by the run; approval and skip are refused, and `fix` retries Review without a repair turn so interrupted changes receive a complete review before publication. Abort remains available; interrupted unvalidated work is retained for inspection even after cancellation and daemon startup cleanup.
 
 |         |                        |
 | ------- | ---------------------- |
 | Type    | `string` (Go duration) |
 | Default | `8h`                   |
 
-Accepts any positive Go `time.ParseDuration` string; values above `8h` are capped at `8h`.
+Accepts any positive Go `time.ParseDuration` string, including values above `8h`.
 Non-positive values are rejected when loading the global config.
 Active elapsed time, process ID, and last activity remain visible in `axi status`; `step_quiet_warning` is an observability signal and never cancels a progressing Review. This setting bounds only the Review step, and no other step or environment variable overrides it.
 
@@ -594,7 +594,7 @@ Active elapsed time, process ID, and last activity remain visible in `axi status
 
 Maximum wall-clock time for one Test-step agent invocation.
 The budget covers the post-test evidence-gathering turn, and a Test-repair turn gets its own budget of the same length.
-The default is eight hours and no configured value can exceed that recovery ceiling. When the deadline expires, the test agent is cancelled and the Test step parks for a decision with an ask-user finding rather than failing the run as a code defect. A process exit before complete evidence parks as `test-agent-incomplete` with an explicit retry action.
+The default is eight hours; explicitly configured longer budgets are honored. When the deadline expires, the test agent is cancelled and the Test step parks for a decision with an ask-user finding rather than failing the run as a code defect. A process exit before complete evidence parks as `test-agent-incomplete` with an explicit retry action.
 Timeout findings include measured activity evidence without forwarding free-form adapter output.
 A late structured result from the expired turn is still not used as a successful Test pass.
 The park keeps the configured `commands.test` result from the same execution, so approving over a failing command is still recorded as a configured-command override.
@@ -611,7 +611,7 @@ You can abort, or choose a shorter limit for a future run and retry.
 | Type    | `string` (Go duration) |
 | Default | `8h`                   |
 
-Accepts any positive Go `time.ParseDuration` string; values above `8h` are capped at `8h`.
+Accepts any positive Go `time.ParseDuration` string, including values above `8h`.
 Non-positive values are rejected when loading the global config.
 An active Test invocation keeps its full budget while it reports activity; `step_quiet_warning` does not cancel it. The step preserves any unvalidated work and requires a `fix` retry or `axi abort` after a cut.
 It bounds only the Test step, and no other step or environment variable overrides it.
@@ -927,7 +927,7 @@ Its finding names that machine-local check and its exit code, and never attribut
 `additional` is refused for preparation and formatting, because those commands are not independent check gates.
 Replacement command strings, `command`, `replace`, `skip`, per-command `env`, unknown command names, empty additional checks, and niceness outside `0` through `19` are configuration errors.
 
-Overrides are always declared, never silent: whenever a command runs under any of these settings, its step output states `machine-local overrides applied to commands.<name>:` followed by the niceness and the added checks, and Test passes the same declaration to its agent for the testing summary.
+Overrides are always declared, never silent: whenever a command runs under any of these settings, its step log states `machine-local overrides applied to commands.<name>:` followed by the niceness and the added checks, once per step rather than per check, and Test passes the same declaration to its agent for the testing summary.
 These settings are scoped to configured shell commands and their local checks, not agents, built-in Git operations, forge commands, or repository-declared extra gates.
 
 There is no per-command environment override.

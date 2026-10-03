@@ -156,7 +156,7 @@ func TestRunTestDaemonStartupError(t *testing.T) {
 // RunWithOptions to return. stopWithin only bounds how long a daemon that
 // never exits can stall the test. Register cleanup for resources that must
 // outlive the daemon (d and its root) before calling this.
-func runTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, sf StepFactory, stopWithin time.Duration) {
+func runTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, sf StepFactory, stopWithin time.Duration) <-chan struct{} {
 	t.Helper()
 
 	stopped := make(chan struct{})
@@ -179,6 +179,7 @@ func runTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, sf StepFactory, stopW
 	})
 
 	waitForDaemonReadyOrExit(t, p, exited)
+	return stopped
 }
 
 // --- Mock steps and helpers for RunManager tests ---
@@ -232,6 +233,12 @@ func (s *mockPanicStep) Execute(_ *pipeline.StepContext) (*pipeline.StepOutcome,
 // startTestDaemonWithSteps starts a daemon with a custom step factory.
 func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.DB) {
 	t.Helper()
+	p, d, _ := startTestDaemonWithStepsAndStopSignal(t, sf)
+	return p, d
+}
+
+func startTestDaemonWithStepsAndStopSignal(t *testing.T, sf StepFactory) (*paths.Paths, *db.DB, <-chan struct{}) {
+	t.Helper()
 
 	tmpDir, err := os.MkdirTemp("", "dtest")
 	if err != nil {
@@ -260,8 +267,8 @@ func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.D
 	// A run reaches its terminal DB state before its goroutine finishes git
 	// worktree cleanup. On process-spawn-bound Windows that cleanup can take
 	// longer than three seconds, so give graceful shutdown its own budget.
-	runTestDaemon(t, p, d, sf, 15*time.Second)
-	return p, d
+	stopped := runTestDaemon(t, p, d, sf, 15*time.Second)
+	return p, d, stopped
 }
 
 // setupTestGitRepo creates a git repo with one commit, pushes to a bare repo
