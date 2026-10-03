@@ -312,10 +312,14 @@ selected=false
 mode=inventory
 for arg do
  if [ "$arg" = "$EXPECTED_SELECTOR" ]; then selected=true; fi
- case "$arg" in app-server) mode=probe;; exec) mode=exec;; esac
+ case "$arg" in app-server) mode=probe;; exec) mode=exec;; get) mode=resolve;; mcp_servers.cloudflare=*) selected=true;; esac
 done
 printf '%s\n' "$@" > "$CAPTURE_PREFIX.$mode"
 case "$mode" in
+ resolve)
+  if ! "$selected"; then exit 1; fi
+  printf '%s\n' '{"name":"cloudflare","enabled":true,"transport":{"type":"streamable_http","url":"https://private-profile.example/mcp"}}'
+  exit 0 ;;
  inventory)
   if "$selected"; then printf '%s\n' '[{"name":"cloudflare"}]'; else printf '%s\n' '[]'; fi
   exit 0 ;;
@@ -356,7 +360,9 @@ done
     opts := RunOpts{CWD: dir, Prompt: "test", ManageMCPAvailability: true, RequiredMCPServers: []string{"cloudflare"}}
     if resume { opts.Session = &SessionRef{ID: "thread"} }
     if _, err := ca.Run(ctx, opts); err != nil { t.Fatal(err) }
-    for _, mode := range []string{"inventory", "probe", "exec"} {
+    modes := []string{"inventory", "probe", "exec"}
+    if strings.HasPrefix(tc.selector, "-p") { modes = append(modes, "resolve") }
+    for _, mode := range modes {
      raw, err := os.ReadFile(capture+"."+mode)
      if err != nil { t.Fatal(err) }
      args := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
@@ -366,7 +372,9 @@ done
       if arg == tc.selector { count++ }
       if arg == "unrelated-model" { model = true }
      }
-     if count != 1 || model != (mode == "exec") { t.Fatalf("%s argv=%q; want one exact selector and model only for execution", mode, args) }
+     wantCount := 1
+     if mode == "probe" && strings.HasPrefix(tc.selector, "-p") { wantCount = 0 }
+     if count != wantCount || model != (mode == "exec") { t.Fatalf("%s argv=%q; want selectors on native profile resolution and model only for execution", mode, args) }
     }
    })
   }

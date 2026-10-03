@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -83,7 +84,11 @@ func codexMCPConfigArgs(args []string) []string {
 
 func runCodexMCPAppServer(ctx context.Context, bin, cwd string, configArgs, env []string) (types.MCPProbeResult, error) {
 	result := types.MCPProbeResult{Status: types.MCPStatusDeclaredNotAuthorized}
-	args := append(append([]string(nil), configArgs...), "app-server")
+	appServerArgs, err := codexMCPAppServerArgs(ctx, bin, cwd, configArgs, env)
+	if err != nil {
+		return result, err
+	}
+	args := append(appServerArgs, "app-server")
 	args = append(args, "--listen", "stdio://")
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = cwd
@@ -179,6 +184,104 @@ func runCodexMCPAppServer(ctx context.Context, bin, cwd string, configArgs, env 
 			return result, ctx.Err()
 		case <-timer.C:
 		}
+	}
+}
+
+// app-server rejects profile flags. Resolve the selected server through the
+// native MCP CLI, then pass its effective connection settings as TOML overrides.
+// Inventory alone is never readiness: the ephemeral thread still connects.
+func codexMCPAppServerArgs(ctx context.Context, bin, cwd string, configArgs, env []string) ([]string, error) {
+	var args []string
+	hasProfile := false
+	for i := 0; i < len(configArgs); i++ {
+		arg := configArgs[i]
+		if arg == "-p" || arg == "--profile" {
+			hasProfile = true
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-p") || strings.HasPrefix(arg, "--profile=") {
+			hasProfile = true
+			continue
+		}
+		args = append(args, arg)
+		if (arg == "-c" || arg == "--config") && i+1 < len(configArgs) {
+			i++
+			args = append(args, configArgs[i])
+		}
+	}
+	if !hasProfile {
+		return args, nil
+	}
+	commandArgs := append(append([]string(nil), configArgs...), "mcp", "get", "cloudflare", "--json")
+	cmd := exec.CommandContext(ctx, bin, commandArgs...)
+	cmd.Dir, cmd.Env = cwd, env
+	shellenv.ConfigureShellCommand(cmd)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, errors.New("Codex MCP profile configuration could not be resolved")
+	}
+	var server map[string]any
+	if json.Unmarshal(output, &server) != nil || stringValue(server["name"]) != "cloudflare" {
+		return nil, errors.New("Codex MCP profile configuration is invalid")
+	}
+	transport, ok := server["transport"].(map[string]any)
+	if !ok {
+		return nil, errors.New("Codex MCP profile transport is invalid")
+	}
+	delete(server, "name")
+	delete(server, "transport")
+	delete(server, "disabled_reason")
+	delete(server, "auth_status")
+	for key, value := range transport {
+		if key != "type" {
+			server[key] = value
+		}
+	}
+	// Replacing the whole table prevents base-config transport or credential
+	// fields absent from the selected profile from leaking into the probe.
+	value, err := codexMCPTOMLValue(server)
+	if err != nil {
+		return nil, err
+	}
+	return append(args, "-c", "mcp_servers.cloudflare="+value), nil
+}
+
+func codexMCPTOMLValue(value any) (string, error) {
+	switch value := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(value))
+		for key, item := range value {
+			if item != nil {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		var entries []string
+		for _, key := range keys {
+			item, err := codexMCPTOMLValue(value[key])
+			if err != nil {
+				return "", err
+			}
+			encodedKey, _ := json.Marshal(key)
+			entries = append(entries, string(encodedKey)+"="+item)
+		}
+		return "{" + strings.Join(entries, ",") + "}", nil
+	case []any:
+		var entries []string
+		for _, item := range value {
+			encoded, err := codexMCPTOMLValue(item)
+			if err != nil {
+				return "", err
+			}
+			entries = append(entries, encoded)
+		}
+		return "[" + strings.Join(entries, ",") + "]", nil
+	case string, bool, float64:
+		encoded, _ := json.Marshal(value)
+		return string(encoded), nil
+	default:
+		return "", errors.New("Codex MCP profile configuration contains an unsupported value")
 	}
 }
 
