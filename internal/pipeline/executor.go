@@ -51,6 +51,7 @@ type Executor struct {
 	config    *config.Config
 	forge     *forgecontext.Context
 	mcpProber MCPReadinessProber
+ mcpReady bool
 	agent     agent.Agent
 	steps     []Step
 	skips     map[types.StepName]bool
@@ -259,6 +260,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
+ e.mcpReady = false
 
 	// Create step result records in DB
 	stepRecords := make(map[types.StepName]*db.StepResult)
@@ -452,6 +454,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
+ e.mcpReady = !hasFindingID(gate.findings, prelaunchMCPAuthorizationID)
 
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
@@ -604,8 +607,12 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			executionMS:     duration,
 			currentRoundID:  gate.lastRoundID,
 		}
-		if response.action == types.ActionAnswer {
-			state.answering = true
+		if hasFindingID(gate.findings, prelaunchMCPAuthorizationID) {
+   if dbErr := e.db.UpdateStepStatus(gate.stepResult.ID, types.StepStatusRunning); dbErr != nil {
+    return e.failRun(run, repo, dbErr, ctx)
+   }
+  } else if response.action == types.ActionAnswer {
+   state.answering = true
 			// Carry the parked gate's outstanding set into the finalize round.
 			// The live path keeps it in locals across `continue rounds`, so an
 			// answer there never loses it; this path rebuilds the state from
@@ -1131,7 +1138,17 @@ rounds:
 	for {
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
-		outcome, err := step.Execute(sctx)
+  var outcome *StepOutcome
+  var err error
+  if !e.mcpReady {
+   outcome, err = e.prelaunchMCPReadiness(sctx)
+   if err == nil && outcome == nil {
+    e.mcpReady = true
+   }
+  }
+  if err == nil && outcome == nil {
+   outcome, err = step.Execute(sctx)
+  }
 		if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
 			return false, "", ErrDaemonShutdown
 		}
@@ -1417,8 +1434,16 @@ rounds:
 				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "aborted by user", &executionMS)
 				return false, "", fmt.Errorf("step %s: aborted by user", stepName)
 
-			case types.ActionFix:
-				telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(effectiveFindings, response.findingIDs), 0))
+   case types.ActionFix:
+    if hasFindingID(effectiveFindings, prelaunchMCPAuthorizationID) {
+     phaseStart = time.Now()
+     if err := markRunning(); err != nil {
+      return false, "", err
+     }
+     nextTrigger = "initial"
+     continue rounds
+    }
+    telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(effectiveFindings, response.findingIDs), 0))
 				// Fix - mark step as fixing, resume execution timer, re-execute.
 				phaseStart = time.Now()
 				selectedCount := selectedFindingCount(effectiveFindings, response.findingIDs)
@@ -1853,7 +1878,7 @@ func (e *Executor) resumeApprovalGate(ctx context.Context, step Step, sctx *Step
 	if !ok {
 		return "", false, nil
 	}
-	if HasProtectedPathRefusal(findingsJSON) {
+	if HasProtectedPathRefusal(findingsJSON) || hasFindingID(findingsJSON, prelaunchMCPAuthorizationID) {
 		return "", false, nil
 	}
 	timeout := e.gateReconcileTimeout
@@ -1872,7 +1897,7 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	if !ok {
 		return false, nil
 	}
-	if HasProtectedPathRefusal(findingsJSON) {
+	if HasProtectedPathRefusal(findingsJSON) || hasFindingID(findingsJSON, prelaunchMCPAuthorizationID) {
 		return false, nil
 	}
 	timeout := e.gateReconcileTimeout
