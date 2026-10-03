@@ -53,7 +53,7 @@ func (p *CodexMCPProber) ProbeMCP(ctx context.Context, cwd, server string) (type
 	result, err := p.probe(probeCtx, p.bin, cwd, p.args, env)
 	result.ExecutorContext = codexExecutorContext(env)
 	if result.NextAction == "" {
-		result.NextAction = codexMCPLoginCommand(p.bin, env, server)
+		result.NextAction = codexMCPLoginCommand(p.bin, env, server, p.args)
 	}
 	return result, err
 }
@@ -261,13 +261,16 @@ func codexExecutorContext(env []string) string {
 	return "daemon Codex default home=" + home
 }
 
-func codexMCPLoginCommand(bin string, env []string, server string) string {
+func codexMCPLoginCommand(bin string, env []string, server string, configArgs []string) string {
 	home := codexHomeFromEnv(env)
 	command := shellQuote(bin) + " mcp login " + shellQuote(server) + " --no-browser"
 	if home != "" {
 		command = "CODEX_HOME=" + shellQuote(home) + " " + command
 	}
-	return command
+ if len(configArgs) > 0 {
+  command = "Before login, supply the same trusted Codex configuration selectors (-c/--config, -p/--profile, or --ignore-user-config) used by this executor. Their values are omitted for privacy; obtain them from the daemon operator and apply them privately to the login command. Do not share credential values. Base command: " + command
+ }
+ return command
 }
 
 func codexHomeFromEnv(env []string) string {

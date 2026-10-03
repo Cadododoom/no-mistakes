@@ -701,7 +701,7 @@ func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt
 	completionOpts.Purpose = "review-coverage"
 	result, err := s.runReviewAgent(sctx, "agent review coverage", role, completionOpts)
 	if err != nil {
-		if recoverableReviewInvocationError(err) {
+		if agent.IsMCPAuthorizationError(err) || recoverableReviewInvocationError(err) {
 			return findings, err
 		}
 		sctx.Log(fmt.Sprintf("focused coverage pass failed (%s); parking on the incomplete coverage record", strings.ReplaceAll(err.Error(), "\n", "; ")))
@@ -1069,19 +1069,14 @@ func reviewInvocationRecoveryOutcome(sctx *pipeline.StepContext, err error) *pip
 		Action:      types.ActionAskUser,
 		Description: fmt.Sprintf("The Review agent invocation did not complete, so this head is not review-certified. Evidence: %s. Respond with fix to retry Review, or abort the run.", evidence),
 	}}
-	if sctx != nil && sctx.Run != nil && sctx.WorkDir != "" {
-		head, headErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
-		status, statusErr := git.Run(sctx.Ctx, sctx.WorkDir, "status", "--porcelain")
-		if (headErr == nil && head != sctx.Run.HeadSHA) || (statusErr == nil && strings.TrimSpace(status) != "") {
-			items = append(items, types.Finding{
-				ID:          types.FindingIDReviewAgentUnvalidatedWork,
-				Severity:    types.FindingSeverityError,
-				Action:      types.ActionAskUser,
-				Description: "The interrupted Review invocation left committed or uncommitted work that no complete Review turn certified. Respond with fix to preserve and review it, or abort the run.",
-			})
-		}
-	}
-	payload, _ := types.MarshalFindingsJSON(types.Findings{Items: items, Summary: "Review agent invocation incomplete"})
+ baseline := ""
+ if sctx != nil && sctx.Run != nil && sctx.WorkDir != "" {
+  baseline = interruptedWorkBaseline(sctx)
+  if finding := interruptedWorkFinding(sctx, types.StepReview, baseline); finding != nil {
+   items = append(items, *finding)
+  }
+ }
+	payload, _ := types.MarshalFindingsJSON(types.Findings{Items: items, Summary: "Review agent invocation incomplete", UnvalidatedSinceSHA: baseline})
 	if sctx != nil && sctx.Log != nil {
 		sctx.Log("Review did not complete; preserving the run worktree for retry (see elapsed time, process, and last-activity status)")
 	}

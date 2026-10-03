@@ -127,7 +127,7 @@ func TestCodexMCPExecutorHomeUsesEffectiveEnvironment(t *testing.T) {
 	if got := codexExecutorContext(env); got != "daemon Codex default home="+filepath.Join("/executor-home", ".codex") {
 		t.Fatalf("executor context = %q", got)
 	}
-	if action := codexMCPLoginCommand("codex", env, "cloudflare"); !strings.Contains(action, "CODEX_HOME='"+filepath.Join("/executor-home", ".codex")+"'") {
+	if action := codexMCPLoginCommand("codex", env, "cloudflare", nil); !strings.Contains(action, "CODEX_HOME='"+filepath.Join("/executor-home", ".codex")+"'") {
 		t.Fatalf("login action uses a different home: %s", action)
 	}
 }
@@ -228,4 +228,29 @@ func TestCodexMCPConfigIsolationIsNeverDropped(t *testing.T) {
 	if strings.Join(got, " ") != want {
 		t.Fatalf("probe configuration = %q, want %q", got, want)
 	}
+}
+
+func TestCodexMCPLoginHandoffExplainsPrivateConfiguration(t *testing.T) {
+ for _, selectors := range [][]string{
+  {"-c", `mcp_servers.cloudflare.url="https://different.example/mcp?token=private-secret"`},
+  {"--profile", "private-profile-name"},
+  {"--config=mcp_servers.cloudflare.http_headers.Authorization=private-secret"},
+  {"--ignore-user-config"},
+ } {
+  prober := NewCodexMCPProber("codex", selectors, runenv.Overlay{Set: map[string]string{"CODEX_HOME": "/daemon/.codex"}})
+  prober.probe = func(_ context.Context, _, _ string, args, _ []string) (types.MCPProbeResult, error) {
+   if strings.Join(args, "\n") != strings.Join(selectors, "\n") {
+    t.Fatalf("probe lost effective configuration: %q", args)
+   }
+   return types.MCPProbeResult{Status: types.MCPStatusAuthorizationRequiredDuringProbe}, nil
+  }
+  result, err := prober.ProbeMCP(context.Background(), "/repo", "cloudflare")
+  if err != nil { t.Fatal(err) }
+  if !strings.Contains(result.NextAction, "same trusted Codex configuration selectors") || !strings.Contains(result.NextAction, "apply them privately to the login command") || !strings.Contains(result.NextAction, "CODEX_HOME='/daemon/.codex'") {
+   t.Fatalf("handoff lost configuration or home instructions: %s", result.NextAction)
+  }
+  for _, secret := range []string{"private-secret", "private-profile-name", "different.example"} {
+   if strings.Contains(result.NextAction, secret) { t.Fatalf("handoff disclosed configuration: %s", result.NextAction) }
+  }
+ }
 }

@@ -74,6 +74,9 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 			}
 		}
 	}
+ if err := agent.RequireMCPServers(ag, opts.RequiredMCPServers, opts.Purpose); err != nil {
+  return nil, err
+ }
 	activity := observeAgentActivity(&opts)
 	return invokeAgent(parent, timeout, activity, func(ctx context.Context) (*agent.Result, error) {
 		if sessionRole != "" && sctx != nil && sctx.Sessions != nil {
@@ -382,4 +385,8 @@ func (a *timeoutAgent) ReportsAgentAttempts() bool {
 
 func (a *timeoutAgent) NeutralizesGateInstructions() bool {
 	return agent.NeutralizesGateInstructions(a.inner)
+}
+
+func (a *timeoutAgent) SupportsMCP(server, purpose string) bool {
+ return agent.SupportsMCP(a.inner, server, purpose)
 }

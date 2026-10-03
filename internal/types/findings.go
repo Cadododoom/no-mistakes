@@ -349,9 +349,6 @@ type Findings struct {
 	Scenarios         []TestScenario     `json:"scenarios,omitempty"`
 	Verdict           string             `json:"verdict,omitempty"`
 	TestedHeadSHA     string             `json:"tested_head_sha,omitempty"`
-	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
-	// unvalidated-work check measured from, carried so a repeated cut before any
-	// evidence turn completes re-measures from that same head.
 	UnvalidatedSinceSHA string `json:"unvalidated_since_sha,omitempty"`
 	RiskLevel           string `json:"risk_level"`
 	RiskRationale       string `json:"risk_rationale"`

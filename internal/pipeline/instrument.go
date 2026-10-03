@@ -291,3 +291,7 @@ func classifyFallbackReason(err error) string {
 		return db.FallbackReasonOther
 	}
 }
+
+func (a *perfRecordingAgent) SupportsMCP(server, purpose string) bool {
+ return agent.SupportsMCP(a.inner, server, purpose)
+}

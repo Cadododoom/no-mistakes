@@ -568,3 +568,64 @@ func worktreeSharesGateRefs(sctx *pipeline.StepContext) (bool, error) {
 	}
 	return os.SameFile(gateInfo, commonInfo), nil
 }
+
+func unvalidatedAgentWork(sctx *pipeline.StepContext, stage types.StepName, validatedHead string) string {
+	dir := sctx.WorkDir
+	var parts []string
+	head, err := stepGitHeadSHA(sctx)
+	switch {
+	case err != nil:
+		parts = append(parts, fmt.Sprintf("a HEAD that could not be read (%v)", err))
+	case rebaseInProgress(sctx.Ctx, dir) || mergeInProgress(sctx.Ctx, dir):
+		parts = append(parts, fmt.Sprintf("an unfinished rebase or merge at %s, not recorded as the run head (inspect with `git -C %s status`)", shortObjectID(head), dir))
+	case head != validatedHead:
+		where := "recorded locally as the run head and not pushed"
+		if head != sctx.Run.HeadSHA {
+			if recErr := recordAgentFixHead(sctx, stage, head); recErr != nil {
+				sctx.Log(fmt.Sprintf("warning: could not record interrupted agent head %s: %v", head, recErr))
+				where = "left in the run worktree"
+			}
+		}
+		parts = append(parts, fmt.Sprintf("commits %s..%s, %s (inspect with `git -C %s log -p %s..%s`)", shortObjectID(validatedHead), shortObjectID(head), where, dir, validatedHead, head))
+	}
+	status, err := stepGitRunRaw(sctx, "status", "--porcelain")
+	if err != nil {
+		parts = append(parts, fmt.Sprintf("a worktree status that could not be read (%v)", err))
+	} else if changed := porcelainPaths(status); len(changed) > 0 {
+		const maxNamed = 10
+		named := strings.Join(changed[:min(len(changed), maxNamed)], ", ")
+		if len(changed) > maxNamed {
+			named += fmt.Sprintf(" and %d more", len(changed)-maxNamed)
+		}
+		parts = append(parts, fmt.Sprintf("uncommitted changes to %s (inspect with `git -C %s status` and `git -C %s diff`)", named, dir, dir))
+	}
+	return strings.Join(parts, "; ")
+}
+
+
+func interruptedWorkFinding(sctx *pipeline.StepContext, stage types.StepName, baseline string) *types.Finding {
+ id := types.FindingIDReviewAgentUnvalidatedWork
+ if stage == types.StepTest {
+  id = types.FindingIDTestAgentUnvalidatedWork
+ }
+ if work := unvalidatedAgentWork(sctx, stage, baseline); work != "" {
+  return &types.Finding{
+   ID: id,
+   Severity: types.FindingSeverityError,
+   Action: types.ActionAskUser,
+   Description: "The interrupted invocation left work that no complete validation turn certified: " + work + ". Respond with fix to preserve and validate it, or abort.",
+  }
+ }
+ for _, raw := range []string{sctx.PreviousFindings, sctx.DeferredFindings} {
+  findings, err := types.ParseFindingsJSON(raw)
+  if err != nil {
+   continue
+  }
+  for _, finding := range findings.Items {
+   if finding.ID == id {
+    return &finding
+   }
+  }
+ }
+ return nil
+}
