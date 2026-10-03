@@ -1149,9 +1149,33 @@ rounds:
   if err == nil && outcome == nil {
    outcome, err = step.Execute(sctx)
   }
-		if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
-			return false, "", ErrDaemonShutdown
-		}
+  if ctx.Err() != nil {
+   if recorder, ok := step.(InterruptedWorkRecorder); ok {
+    inspectCtx, cancelInspect := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+    inspection := *sctx
+    inspection.Ctx = inspectCtx
+    retained, inspectErr := recorder.InterruptedWorkFindings(&inspection)
+    cancelInspect()
+    if inspectErr == nil && retained != "" {
+     findings := mergeFindingsJSON(sctx.PreviousFindings, sctx.DeferredFindings)
+     stored, readErr := e.db.GetStepResult(sr.ID)
+     if readErr != nil {
+      inspectErr = readErr
+     } else {
+      if stored.FindingsJSON != nil { findings = mergeFindingsJSON(findings, *stored.FindingsJSON) }
+      if outcome != nil { findings = mergeFindingsJSON(findings, outcome.Findings) }
+      inspectErr = e.db.SetStepFindings(sr.ID, mergeFindingsJSON(retained, findings))
+     }
+    }
+    if inspectErr != nil {
+     return false, "", fmt.Errorf("preserve interrupted %s work: %w", stepName, inspectErr)
+    }
+   }
+   if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+    return false, "", ErrDaemonShutdown
+   }
+   err = context.Cause(ctx)
+  }
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -1990,6 +2014,13 @@ func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+ for _, name := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD"} {
+  operationPath, err := git.Run(ctx, e.workDir, "rev-parse", "--git-path", name)
+  if err != nil { return "", false }
+  operationPath = strings.TrimSpace(operationPath)
+  if !filepath.IsAbs(operationPath) { operationPath = filepath.Join(e.workDir, operationPath) }
+  if _, err := os.Stat(operationPath); !os.IsNotExist(err) { return "", false }
+ }
 	observed, err := git.HeadSHA(ctx, e.workDir)
 	if err != nil {
 		slog.Warn("failed to resolve worktree head before terminalization", "run", run.ID, "error", err)

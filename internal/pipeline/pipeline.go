@@ -251,6 +251,10 @@ type Step interface {
 	Execute(sctx *StepContext) (*StepOutcome, error)
 }
 
+type InterruptedWorkRecorder interface {
+ InterruptedWorkFindings(sctx *StepContext) (string, error)
+}
+
 // ApprovalGateReconciler is implemented by a step whose parked approval gate
 // can become obsolete when an external source of truth changes. The executor
 // invokes it with a bounded context while also waiting for an approval. A true

@@ -186,10 +186,10 @@ Previous test findings to address:
 		}
 	}
 	if repairCut != nil {
-		if isTestAgentProcessExit(repairCut) {
-			return testAgentProcessExitOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
+		if errors.Is(repairCut, errTestAgentTimeout) {
+			return testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
 		}
-		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
+		return testAgentProcessExitOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
 	}
 
 	evidenceDir := testEvidenceDir(sctx)
@@ -671,6 +671,7 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 
 func testAgentProcessExitOutcome(sctx *pipeline.StepContext, err error, startHead string, baseline []Finding, baselineSummary string, exitCode int) *pipeline.StepOutcome {
 	outcome := testAgentTimeoutOutcome(sctx, err, startHead, baseline, baselineSummary, exitCode)
+ if errors.Is(err, errTestAgentTimeout) { return outcome }
 	findings, parseErr := types.ParseFindingsJSON(outcome.Findings)
 	if parseErr != nil {
 		return outcome
@@ -817,7 +818,7 @@ func porcelainPaths(status string) []string {
 // testAgentError records bounded activity evidence for a timed-out Test turn
 // and an exit status for a process that terminated before a complete result.
 func testAgentError(ctx context.Context, timeout time.Duration, prefix string, err error) error {
-	if timeout > 0 && errors.Is(context.Cause(ctx), errTestAgentTimeout) {
+	if timeout > 0 && (errors.Is(context.Cause(ctx), errTestAgentTimeout) || errors.Is(err, errTestAgentTimeout)) {
 		return &testAgentInvocationError{prefix: prefix, timeout: timeout, timedOut: true, evidence: testAgentObservation(err), cause: errors.Join(errTestAgentTimeout, err)}
 	}
 	if err != nil {
@@ -854,7 +855,7 @@ func (e *testAgentInvocationError) Unwrap() error { return e.cause }
 
 func isTestAgentProcessExit(err error) bool {
 	var exitErr *exec.ExitError
-	return errors.As(err, &exitErr)
+	return !errors.Is(err, errTestAgentTimeout) && errors.As(err, &exitErr)
 }
 
 // VerifyApprovalOverride implements pipeline.ApprovalOverrideVerifier. It
