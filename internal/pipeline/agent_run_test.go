@@ -900,7 +900,9 @@ func TestRunAgent_AgentWaitingOnALiveChildOutlastsTheStallBudget(t *testing.T) {
 			// output it announces the call and spawns the child at once, and
 			// that child runs past the stall budget while the agent itself
 			// writes nothing.
-			return runLaunchedShell(ctx, opts, "read go; sleep 2.5", func(started, _ func()) {
+			// Keep the shell alive after sleep: some /bin/sh implementations
+			// exec the last command, removing the child this test needs.
+			return runLaunchedShell(ctx, opts, "read go; sleep 2.5; :", func(started, _ func()) {
 				opts.OnChunk("init\n")
 				time.Sleep(300 * time.Millisecond)
 				opts.OnChunk("running the suite\n")
@@ -936,7 +938,7 @@ func TestRunAgent_ToolAfterAnOnlyOutputBeforeAnySampleStillExtends(t *testing.T)
 			// The agent's only observed output lands right at launch, before
 			// any child sample settles; its later bytes are throttled away, and
 			// the long tool it starts afterwards is the only sign of work.
-			return runLaunchedShell(ctx, opts, "read go; sleep 2.5", func(started, _ func()) {
+			return runLaunchedShell(ctx, opts, "read go; sleep 2.5; :", func(started, _ func()) {
 				opts.OnChunk("init\n")
 				time.Sleep(200 * time.Millisecond)
 				started()
@@ -970,7 +972,7 @@ func TestRunAgent_ToolAnnouncedByTheFirstOutputOutlastsTheStallBudget(t *testing
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			// The agent's very first output only announces a tool call, and
 			// the tool starts at once and runs quietly past the stall budget.
-			return runLaunchedShell(ctx, opts, "read go; sleep 2.5", func(started, _ func()) {
+			return runLaunchedShell(ctx, opts, "read go; sleep 2.5; :", func(started, _ func()) {
 				time.Sleep(1200 * time.Millisecond)
 				opts.OnChunk("running the suite\n")
 				started()
