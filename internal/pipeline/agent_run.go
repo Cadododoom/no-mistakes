@@ -19,12 +19,12 @@ import (
 var ErrAgentTimeout = errors.New("agent timeout")
 
 // AgentTimeout is the per-invocation budget applied at the shared agent-run
-// seam. A positive Config.AgentTimeout wins up to the 8h recovery ceiling.
+// seam. A positive Config.AgentTimeout wins when configured.
 func AgentTimeout(cfg *config.Config) time.Duration {
 	if cfg != nil && cfg.AgentTimeout > 0 {
-		return config.BoundAgentInvocationTimeout(cfg.AgentTimeout, config.DefaultAgentTimeout)
+		return cfg.AgentTimeout
 	}
-	return config.BoundAgentInvocationTimeout(0, config.DefaultAgentTimeout)
+	return config.DefaultAgentTimeout
 }
 
 // RunAgent executes one agent invocation with a deadline scoped only to that

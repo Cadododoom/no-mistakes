@@ -235,7 +235,7 @@ func findMCPServerStatus(response map[string]any, wanted string) map[string]any 
 	data, _ := result["data"].([]any)
 	for _, value := range data {
 		status, _ := value.(map[string]any)
-		if strings.EqualFold(stringValue(status["name"]), wanted) {
+		if stringValue(status["name"]) == wanted {
 			return status
 		}
 	}

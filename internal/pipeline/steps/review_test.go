@@ -330,7 +330,7 @@ func TestReviewStep_ProcessExitParksAndPreservesPartialWork(t *testing.T) {
 
 // TestReviewStep_EachAgentInvocationGetsItsOwnBudget proves a healthy turn can
 // pass the former 30-minute wall while every later invocation gets a fresh
-// eight-hour recovery ceiling.
+// invocation budget.
 func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)

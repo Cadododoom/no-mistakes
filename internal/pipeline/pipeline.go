@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	"errors"
-	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -150,7 +149,7 @@ func (sctx *StepContext) MCPReadiness(stage types.StepName, server string) (bool
 	}
 	required := false
 	for _, requirement := range requirements {
-		if requirement.Stage == stage && strings.EqualFold(requirement.Server, server) {
+		if requirement.Stage == stage && requirement.Server == server {
 			required = true
 			break
 		}

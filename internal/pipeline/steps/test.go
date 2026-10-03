@@ -603,9 +603,9 @@ func mergeNewTestFiles(fromFix, fromEvidence []string) []string {
 }
 
 func testAgentContext(sctx *pipeline.StepContext) (context.Context, context.CancelFunc, time.Duration) {
-	timeout := config.BoundAgentInvocationTimeout(0, config.DefaultTestAgentTimeout)
+	timeout := config.DefaultTestAgentTimeout
 	if sctx != nil && sctx.Config != nil && sctx.Config.TestAgentTimeout > 0 {
-		timeout = config.BoundAgentInvocationTimeout(sctx.Config.TestAgentTimeout, config.DefaultTestAgentTimeout)
+		timeout = sctx.Config.TestAgentTimeout
 	}
 	ctx, cancel := context.WithTimeoutCause(sctx.Ctx, timeout, errTestAgentTimeout)
 	return ctx, cancel, timeout

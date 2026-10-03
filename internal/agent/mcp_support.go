@@ -2,7 +2,6 @@ package agent
 
 import (
  "fmt"
- "strings"
 
  "github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -40,7 +39,7 @@ func RequireMCPServers(a Agent, servers []string, purpose string) error {
 }
 
 func (a *codexAgent) SupportsMCP(server, _ string) bool {
- return strings.EqualFold(server, "cloudflare")
+ return server == "cloudflare"
 }
 
 func (a *fallbackAgent) SupportsMCP(server, purpose string) bool {

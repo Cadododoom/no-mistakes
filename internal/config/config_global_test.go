@@ -11,26 +11,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestBoundAgentInvocationTimeoutCapsAtEightHours(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		configured time.Duration
-		fallback   time.Duration
-		want       time.Duration
-	}{
-		{name: "default fallback", fallback: 30 * time.Minute, want: 30 * time.Minute},
-		{name: "configured short budget", configured: 2 * time.Hour, fallback: 8 * time.Hour, want: 2 * time.Hour},
-		{name: "configured over ceiling", configured: 12 * time.Hour, fallback: 8 * time.Hour, want: MaxAgentInvocationTimeout},
-		{name: "fallback over ceiling", fallback: 12 * time.Hour, want: MaxAgentInvocationTimeout},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := BoundAgentInvocationTimeout(test.configured, test.fallback); got != test.want {
-				t.Fatalf("BoundAgentInvocationTimeout(%s, %s) = %s, want %s", test.configured, test.fallback, got, test.want)
-			}
-		})
-	}
-}
-
 func TestLoadGlobal_Defaults(t *testing.T) {
 	// Non-existent file should return defaults
 	cfg, err := LoadGlobal("/nonexistent/config.yaml")
@@ -832,4 +812,12 @@ func TestLoadGlobal_AutoFixPartial(t *testing.T) {
 	if cfg.AutoFix.Test != nil {
 		t.Errorf("test = %v, want nil", cfg.AutoFix.Test)
 	}
+}
+
+func TestLoadGlobal_LongInvocationBudgets(t *testing.T) {
+ path := filepath.Join(t.TempDir(), "config.yaml")
+ if err := os.WriteFile(path, []byte("agent_timeout: 12h\nreview_agent_timeout: 16h\ntest_agent_timeout: 24h\n"), 0o644); err != nil { t.Fatal(err) }
+ cfg, err := LoadGlobal(path)
+ if err != nil { t.Fatal(err) }
+ if cfg.AgentTimeout != 12*time.Hour || cfg.ReviewAgentTimeout != 16*time.Hour || cfg.TestAgentTimeout != 24*time.Hour { t.Fatalf("loaded budgets = %v %v %v", cfg.AgentTimeout, cfg.ReviewAgentTimeout, cfg.TestAgentTimeout) }
 }
