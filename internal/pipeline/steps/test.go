@@ -320,7 +320,16 @@ Rules:
 	findings, err := runTestAnalyzer(sctx, evidencePrompt)
 	if err != nil {
 		if status, ok := mcpAuthorizationStatusFromError(err); ok {
-			return mcpAuthorizationOutcome(sctx, s.Name(), status, true), nil
+			outcome := mcpAuthorizationOutcome(sctx, s.Name(), status, true)
+			park, _ := types.ParseFindingsJSON(outcome.Findings)
+			park.Items = slices.DeleteFunc(park.Items, func(item Finding) bool { return item.Category == types.FindingCategoryTestCommand })
+			park.Items = append(baselineFindings, park.Items...)
+			park.Tested = append(append([]string{}, tested...), park.Tested...)
+			park.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, park.Summary}, "\n"))
+			outcome.Findings, _ = types.MarshalFindingsJSON(park)
+			outcome.ExitCode = baselineExitCode
+			outcome.FixSummary = fixSummary
+			return outcome, nil
 		}
 		if errors.Is(err, errTestAgentTimeout) {
 			outcome := testAgentTimeoutOutcome(sctx, err, startHead, baselineFindings, baselineSummary, baselineExitCode)
@@ -641,6 +650,7 @@ var errTestAgentTimeout = errors.New("test agent timeout")
 // fix round keeps the gate it was answering.
 func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead string, baseline []Finding, baselineSummary string, exitCode int) *pipeline.StepOutcome {
 	park := answeredTestGate(sctx)
+	park.Items = slices.DeleteFunc(park.Items, func(item Finding) bool { return item.Category == types.FindingCategoryTestCommand })
 	cause := "This is a budget or provider-slowness cut, not a code failure."
 	if exitCode != 0 || hasBlockingFindings(park.Items) || park.Verdict == types.TestVerdictNoGo || park.Verdict == types.TestVerdictInconclusive {
 		cause = "The cut does not clear the findings reported alongside it."
@@ -733,13 +743,6 @@ func testAgentObservation(err error) string {
 	return ""
 }
 
-// answeredTestGate is what a fix round carries onto a budget-cut park from the
-// gate it answers: its selected and deferred findings, the last completed
-// evidence turn's verdict, scenarios, and tested head, and the head an earlier
-// cut measured unvalidated work from. The budget-cut findings and the
-// configured-command result are left out because this execution derives them
-// again, and IDs are cleared so the executor numbers the park without
-// colliding with them.
 func answeredTestGate(sctx *pipeline.StepContext) Findings {
 	var carried Findings
 	if !sctx.Fixing {
@@ -756,9 +759,6 @@ func answeredTestGate(sctx *pipeline.StepContext) Findings {
 			metadataSet = true
 		}
 		for _, item := range testRepairableFindings(answered).Items {
-			if item.Category == types.FindingCategoryTestCommand {
-				continue
-			}
 			item.ID = ""
 			carried.Items = append(carried.Items, item)
 		}

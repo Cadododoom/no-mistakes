@@ -122,7 +122,6 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	var lastMessage string
 	var codexErr string
 	var threadID string
-	var mcpAuthErr *MCPAuthorizationError
 	metrics := newCodexMetricsAccumulator()
 	// An error return carries the same session facts the success path sets
 	// below, so cumulative thread usage is never read as a per-round delta.
@@ -135,7 +134,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		}
 		return res
 	}
-	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, &usage, &lastMessage, &codexErr, &threadID, metrics, opts.RequiredMCPServers, &mcpAuthErr); err != nil {
+	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, &usage, &lastMessage, &codexErr, &threadID, metrics, opts.RequiredMCPServers); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("codex parse events: %w", err)
@@ -145,10 +144,6 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 
 	waitErr := started.wait()
 	stderrWG.Wait()
-	if mcpAuthErr != nil {
-		emitAgentExited(opts, "codex", pid, mcpAuthErr)
-		return partialResult(), mcpAuthErr
-	}
 	if waitErr != nil {
 		detail := strings.TrimSpace(codexErr)
 		stderr := strings.TrimSpace(string(stderrBuf))
@@ -391,7 +386,7 @@ type codexUsage struct {
 // evidence (round-trips, tool calls + categories, subprocess wait time). It is
 // clocked by time.Now as events arrive, so a tool item's started->completed gap
 // is its real subprocess wall time.
-func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, lastMessage *string, codexErr *string, threadID *string, metrics *codexMetricsAccumulator, requiredMCPServers []string, mcpAuthErr **MCPAuthorizationError) error {
+func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, lastMessage *string, codexErr *string, threadID *string, metrics *codexMetricsAccumulator, requiredMCPServers []string) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024*1024)
 
@@ -428,10 +423,8 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 
 		case "item.completed":
 			metrics.onItem(event.Type, event.Item, time.Now())
-			if event.Item != nil && mcpAuthErr != nil && *mcpAuthErr == nil {
-				if server := failedRequiredMCPAuthorization(event.Item, requiredMCPServers); server != "" {
-					*mcpAuthErr = &MCPAuthorizationError{Server: server}
-				}
+			if server := failedRequiredMCPAuthorization(event.Item, requiredMCPServers); server != "" {
+				return &MCPAuthorizationError{Server: server}
 			}
 			if event.Item != nil && event.Item.Type == "agent_message" {
 				*lastMessage = event.Item.Text

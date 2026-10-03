@@ -3,7 +3,9 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -250,6 +252,110 @@ func TestTestStep_AuthorizedRetryDropsResolvedControls(t *testing.T) {
 				}
 				if selection == "authorization-and-defect" && !strings.Contains(outcome.Findings, "retained defect") {
 					t.Fatalf("defect lost: %s", outcome.Findings)
+				}
+			})
+		}
+	}
+}
+
+func TestTestStep_AuthorizationParkPreservesUnresolvedEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		phase       string
+		commandExit int
+	}{{"preflight", 4}, {"repair", 4}, {"evidence", 4}, {"evidence", 0}} {
+		phase := tc.phase
+		for _, deferred := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/command=%d/deferred=%v", phase, tc.commandExit, deferred), func(t *testing.T) {
+				dir, base, head := setupGitRepo(t)
+				retry := false
+				calls := 0
+				ag := &mcpTestAgent{mockAgent: &mockAgent{name: "mcp", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					calls++
+					if retry {
+						if opts.Purpose == "test-fix" {
+							t.Fatal("authorization-only retry launched repair")
+						}
+						<-ctx.Done()
+						return nil, ctx.Err()
+					}
+					if phase == "evidence" && opts.Purpose == "test-fix" {
+						return &agent.Result{Output: json.RawMessage(`{"summary":"no changes"}`)}, nil
+					}
+					return nil, &agent.MCPAuthorizationError{Server: "cloudflare"}
+				}}}
+				sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Test: fmt.Sprintf("exit %d", tc.commandExit)})
+				sctx.Fixing = true
+				sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+				sctx.Run.RequiredMCPJSON = `[{"stage":"test","server":"cloudflare"}]`
+				prior, err := types.ParseFindingsJSON(noGoTestGateJSON(head))
+				if err != nil {
+					t.Fatal(err)
+				}
+				prior.TestingSummary = "completed checkout evidence"
+				prior.Tested = []string{"checkout"}
+				prior.Artifacts = []types.TestArtifact{{Kind: "file", Path: "checkout.png"}}
+				prior.Items = append(prior.Items, Finding{ID: "command", Category: types.FindingCategoryTestCommand, Severity: types.FindingSeverityError, Description: "old configured failure"})
+				raw, _ := types.MarshalFindingsJSON(prior)
+				persistTestStepFindings(t, sctx, 7, raw)
+				sctx.PreviousFindings = raw
+				if deferred {
+					sctx.PreviousFindings, sctx.DeferredFindings = answerTestPark(t, raw, "command")
+				}
+				prober := &fakeMCPReadinessProber{result: types.MCPProbeResult{Status: types.MCPStatusAuthorized}}
+				if phase == "preflight" {
+					prober.result.Status = types.MCPStatusDeclaredNotAuthorized
+				}
+				sctx.MCPProber = prober
+				park, err := (&TestStep{}).Execute(sctx)
+				if err != nil || park == nil || !pipeline.HasMCPAuthorizationRefusal(park.Findings) {
+					t.Fatalf("park=%+v err=%v", park, err)
+				}
+				if phase == "preflight" && calls != 0 {
+					t.Fatal("preflight launched an agent")
+				}
+				carried, err := types.ParseFindingsJSON(park.Findings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if carried.Verdict != prior.Verdict || !reflect.DeepEqual(carried.Scenarios, prior.Scenarios) || carried.TestedHeadSHA != head || carried.TestingSummary != prior.TestingSummary || !reflect.DeepEqual(carried.Artifacts, prior.Artifacts) || !strings.Contains(park.Findings, "failed: checkout") {
+					t.Fatalf("lost completed evidence: %s", park.Findings)
+				}
+				expectedExit := 7
+				if phase == "evidence" {
+					expectedExit = tc.commandExit
+				}
+				if park.ExitCode != expectedExit {
+					t.Fatalf("exit=%d want=%d", park.ExitCode, expectedExit)
+				}
+				if phase == "evidence" {
+					if strings.Contains(park.Findings, "old configured failure") || (tc.commandExit != 0 && !strings.Contains(park.Findings, "exit code 4")) {
+						t.Fatalf("current command result lost: %s", park.Findings)
+					}
+				} else if !strings.Contains(park.Findings, "old configured failure") {
+					t.Fatalf("prior command lost: %s", park.Findings)
+				}
+				retry = true
+				prober.result.Status = types.MCPStatusAuthorized
+				sctx.PreviousFindings, sctx.DeferredFindings = answerTestPark(t, park.Findings, types.FindingIDMCPAuthorizationRequired)
+				cut, err := (&TestStep{}).Execute(sctx)
+				if err != nil || cut == nil || !cut.NeedsApproval || pipeline.HasMCPAuthorizationRefusal(cut.Findings) {
+					t.Fatalf("retry=%+v err=%v", cut, err)
+				}
+				after, _ := types.ParseFindingsJSON(cut.Findings)
+				if after.Verdict != types.TestVerdictNoGo || !reflect.DeepEqual(after.Scenarios, prior.Scenarios) || !strings.Contains(cut.Findings, "failed: checkout") || cut.ExitCode != tc.commandExit {
+					t.Fatalf("unresolved failures became a budget-only gate: %+v", cut)
+				}
+				if strings.Contains(testFindingByID(t, cut.Findings, types.FindingIDTestAgentTimeout).Description, "not a code failure") {
+					t.Fatal("unresolved no-go misreported as harmless")
+				}
+				persistTestStepFindings(t, sctx, cut.ExitCode, cut.Findings)
+				expectedReason := "configured test command failed with exit code 4"
+				if tc.commandExit == 0 {
+					expectedReason = ""
+				}
+				reason, err := (&TestStep{}).VerifyApprovalOverride(sctx)
+				if err != nil || reason != expectedReason {
+					t.Fatalf("approval reason=%q err=%v", reason, err)
 				}
 			})
 		}

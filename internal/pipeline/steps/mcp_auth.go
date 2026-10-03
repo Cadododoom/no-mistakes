@@ -3,6 +3,7 @@ package steps
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -68,17 +69,29 @@ func mcpAuthorizationOutcome(sctx *pipeline.StepContext, stage types.StepName, s
 		sctx.Log(fmt.Sprintf("MCP cloudflare: %s for %s in %s", status.Status, stage, status.ExecutorContext))
 	}
 	outcome := pipeline.MCPAuthorizationOutcome(stage, status, false)
- if sctx == nil || sctx.Run == nil || sctx.WorkDir == "" {
-  return outcome
- }
- baseline := interruptedWorkBaseline(sctx)
- findings, _ := types.ParseFindingsJSON(outcome.Findings)
- findings.UnvalidatedSinceSHA = baseline
- if finding := interruptedWorkFinding(sctx, stage, baseline); finding != nil {
-  findings.Items = append(findings.Items, *finding)
- }
- outcome.Findings, _ = types.MarshalFindingsJSON(findings)
- return outcome
+	findings, _ := types.ParseFindingsJSON(outcome.Findings)
+	if stage == types.StepTest && sctx != nil {
+		carried := answeredTestGate(sctx)
+		carried.Items = append(findings.Items, carried.Items...)
+		carried.Summary = strings.TrimSpace(strings.Join([]string{carried.Summary, findings.Summary}, "\n"))
+		findings = carried
+		if sctx.DB != nil && sctx.StepResultID != "" {
+			if previous, err := sctx.DB.GetStepResult(sctx.StepResultID); err == nil && previous != nil && previous.ExitCode != nil {
+				outcome.ExitCode = *previous.ExitCode
+			}
+		}
+	}
+	if sctx == nil || sctx.Run == nil || sctx.WorkDir == "" {
+		outcome.Findings, _ = types.MarshalFindingsJSON(findings)
+		return outcome
+	}
+	baseline := interruptedWorkBaseline(sctx)
+	findings.UnvalidatedSinceSHA = baseline
+	if finding := interruptedWorkFinding(sctx, stage, baseline); finding != nil {
+		findings.Items = append(findings.Items, *finding)
+	}
+	outcome.Findings, _ = types.MarshalFindingsJSON(findings)
+	return outcome
 }
 
 func onlyMCPAuthorizationFindings(raw string) bool {
@@ -86,17 +99,17 @@ func onlyMCPAuthorizationFindings(raw string) bool {
 	if err != nil || len(findings.Items) == 0 {
 		return false
 	}
- authorization := false
- for _, finding := range findings.Items {
-  if finding.Category == types.FindingCategoryMCPAuthorization || finding.AuthorizationRequired != nil {
-   authorization = true
-   continue
-  }
-  if finding.ID != types.FindingIDReviewAgentUnvalidatedWork && finding.ID != types.FindingIDTestAgentUnvalidatedWork {
-   return false
-  }
- }
- return authorization
+	authorization := false
+	for _, finding := range findings.Items {
+		if finding.Category == types.FindingCategoryMCPAuthorization || finding.AuthorizationRequired != nil {
+			authorization = true
+			continue
+		}
+		if finding.ID != types.FindingIDReviewAgentUnvalidatedWork && finding.ID != types.FindingIDTestAgentUnvalidatedWork {
+			return false
+		}
+	}
+	return authorization
 }
 
 func mcpAuthorizationStatusFromError(err error) (types.MCPProbeResult, bool) {
@@ -110,20 +123,20 @@ func mcpAuthorizationStatusFromError(err error) (types.MCPProbeResult, bool) {
 }
 
 func interruptedWorkBaseline(sctx *pipeline.StepContext) string {
- for _, raw := range []string{sctx.PreviousFindings, sctx.DeferredFindings} {
-  findings, err := types.ParseFindingsJSON(raw)
-  if err != nil {
-   continue
-  }
-  if findings.UnvalidatedSinceSHA != "" {
-   return findings.UnvalidatedSinceSHA
-  }
-  if findings.TestedHeadSHA != "" {
-   return findings.TestedHeadSHA
-  }
- }
- if sctx.ReviewStartingHeadSHA != "" {
-  return sctx.ReviewStartingHeadSHA
- }
- return sctx.Run.HeadSHA
+	for _, raw := range []string{sctx.PreviousFindings, sctx.DeferredFindings} {
+		findings, err := types.ParseFindingsJSON(raw)
+		if err != nil {
+			continue
+		}
+		if findings.UnvalidatedSinceSHA != "" {
+			return findings.UnvalidatedSinceSHA
+		}
+		if findings.TestedHeadSHA != "" {
+			return findings.TestedHeadSHA
+		}
+	}
+	if sctx.ReviewStartingHeadSHA != "" {
+		return sctx.ReviewStartingHeadSHA
+	}
+	return sctx.Run.HeadSHA
 }
