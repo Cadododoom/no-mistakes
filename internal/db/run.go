@@ -145,14 +145,6 @@ func (r *Run) MCPRequirements() ([]types.MCPRequirement, error) {
 	return types.ParseMCPRequirements(r.RequiredMCPJSON)
 }
 
-// MCPRequirements returns the immutable per-run MCP requirements, failing
-// closed if a stored value cannot be parsed or validated.
-func (r *Run) MCPRequirements() ([]types.MCPRequirement, error) {
-	if r == nil {
-		return nil, nil
-	}
-	return types.ParseMCPRequirements(r.RequiredMCPJSON)
-}
 
 // WorktreePath returns the recorded worktree directory of this run, or "" for
 // a run recorded before placement was durable. Callers resolve the empty case

@@ -20,12 +20,12 @@ import (
 var ErrAgentTimeout = errors.New("agent timeout")
 
 // AgentTimeout is the per-invocation budget applied at the shared agent-run
-// seam. A positive Config.AgentTimeout wins up to the 8h recovery ceiling.
+// seam. A positive Config.AgentTimeout wins when configured.
 func AgentTimeout(cfg *config.Config) time.Duration {
 	if cfg != nil && cfg.AgentTimeout > 0 {
-		return config.BoundAgentInvocationTimeout(cfg.AgentTimeout, config.DefaultAgentTimeout)
+		return cfg.AgentTimeout
 	}
-	return config.BoundAgentInvocationTimeout(0, config.DefaultAgentTimeout)
+	return config.DefaultAgentTimeout
 }
 
 // AgentWorkingTimeout is the optional still-working cap for the shared seam.
@@ -108,10 +108,6 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 				}
 			}
 		}
-	}
-	timeout = config.BoundAgentInvocationTimeout(timeout, config.DefaultAgentTimeout)
-	if working > config.MaxAgentInvocationTimeout {
-		working = config.MaxAgentInvocationTimeout
 	}
 	if err := agent.RequireMCPServers(ag, opts.RequiredMCPServers, opts.Purpose); err != nil {
 		return nil, err

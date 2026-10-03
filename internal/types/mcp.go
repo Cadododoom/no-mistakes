@@ -3,7 +3,6 @@ package types
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 )
@@ -14,8 +13,6 @@ type MCPRequirement struct {
 	Stage  StepName `json:"stage"`
 	Server string   `json:"server"`
 }
-
-var mcpServerNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 
 // ParseMCPRequirement parses the public stage:server spelling used by
 // `axi run --require-mcp` and Git push options.
@@ -37,10 +34,7 @@ func (r MCPRequirement) Validate() error {
 	if r.Stage != StepReview && r.Stage != StepTest {
 		return fmt.Errorf("MCP requirement stage %q must be review or test", r.Stage)
 	}
-	if !mcpServerNameRE.MatchString(r.Server) {
-		return fmt.Errorf("invalid MCP server name %q", r.Server)
-	}
-	if !strings.EqualFold(r.Server, "cloudflare") {
+	if r.Server != "cloudflare" {
 		return fmt.Errorf("MCP server %q is not supported yet; supported server: cloudflare", r.Server)
 	}
 	return nil
@@ -54,7 +48,7 @@ func ValidateMCPRequirements(requirements []MCPRequirement) error {
 		if err := requirement.Validate(); err != nil {
 			return err
 		}
-		key := string(requirement.Stage) + ":" + strings.ToLower(requirement.Server)
+		key := string(requirement.Stage) + ":" + requirement.Server
 		if _, ok := seen[key]; ok {
 			return fmt.Errorf("duplicate MCP requirement %q", key)
 		}
@@ -63,12 +57,12 @@ func ValidateMCPRequirements(requirements []MCPRequirement) error {
 	return nil
 }
 
-// CanonicalMCPRequirements validates and returns a stable, case-normalized
+// CanonicalMCPRequirements validates and returns a stable, whitespace-trimmed
 // ordering suitable for an immutable run record and launch proof.
 func CanonicalMCPRequirements(requirements []MCPRequirement) ([]MCPRequirement, error) {
 	canonical := append([]MCPRequirement(nil), requirements...)
 	for i := range canonical {
-		canonical[i].Server = strings.ToLower(strings.TrimSpace(canonical[i].Server))
+		canonical[i].Server = strings.TrimSpace(canonical[i].Server)
 	}
 	if err := ValidateMCPRequirements(canonical); err != nil {
 		return nil, err

@@ -40,17 +40,10 @@ const (
 	// DefaultStepQuietWarning is how long a running/fixing step can go without
 	// a new log or lifecycle activity before AXI status marks it quiet.
 	DefaultStepQuietWarning = 10 * time.Minute
-	// MaxAgentInvocationTimeout is the recovery ceiling for one active agent
-	// invocation. A healthy invocation can run to this ceiling; its stage then
-	// preserves work and parks for explicit retry or cancellation.
-	MaxAgentInvocationTimeout = 8 * time.Hour
 	// DefaultAgentTimeout bounds one pipeline agent invocation that does not
-	// install a more specific deadline. The long ceiling avoids truncating
-	// healthy agent work; Review and Test turn the same ceiling into a
-	// recoverable gate that preserves unvalidated changes.
+	// install a more specific deadline.
 	DefaultAgentTimeout = 8 * time.Hour
-	// DefaultReviewAgentTimeout is the recovery ceiling for one review or
-	// review-fix invocation. Every later invocation derives a fresh budget.
+	// DefaultReviewAgentTimeout is the default for one review or review-fix invocation.
 	DefaultReviewAgentTimeout = 8 * time.Hour
 	// DefaultTestAgentTimeout bounds one Test-step agent invocation, including
 	// the post-test evidence-gathering turn and a Test-repair turn.
@@ -149,18 +142,6 @@ const (
 	// grow the directory without bound.
 	DefaultWorktreeMaxRuns = 20
 )
-
-// BoundAgentInvocationTimeout preserves shorter configured budgets while
-// enforcing the maximum unattended invocation time.
-func BoundAgentInvocationTimeout(configured, fallback time.Duration) time.Duration {
-	if configured <= 0 {
-		configured = fallback
-	}
-	if configured <= 0 || configured > MaxAgentInvocationTimeout {
-		return MaxAgentInvocationTimeout
-	}
-	return configured
-}
 
 // GlobalConfig represents ~/.no-mistakes/config.yaml.
 type GlobalConfig struct {

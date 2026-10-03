@@ -606,7 +606,7 @@ func mergeNewTestFiles(fromFix, fromEvidence []string) []string {
 
 func testAgentTimeout(sctx *pipeline.StepContext) time.Duration {
 	if sctx != nil && sctx.Config != nil && sctx.Config.TestAgentTimeout > 0 {
-		return config.BoundAgentInvocationTimeout(sctx.Config.TestAgentTimeout, config.DefaultTestAgentTimeout)
+		return sctx.Config.TestAgentTimeout
 	}
 	return config.DefaultTestAgentTimeout
 }

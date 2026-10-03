@@ -182,6 +182,9 @@ func TestFailedRequiredMCPAuthorizationRequiresMatchingDeclaredServer(t *testing
 		{name: "declared", server: "cloudflare", required: []string{"cloudflare"}, want: "cloudflare"},
 		{name: "undeclared", server: "cloudflare", required: nil},
 		{name: "different server", server: "other", required: []string{"cloudflare"}},
+		{name: "different configuration key", server: "Cloudflare", required: []string{"cloudflare"}},
+		{name: "unaccepted requirement alias", server: "cloudflare", required: []string{"Cloudflare"}},
+		{name: "unaccepted matching alias", server: "Cloudflare", required: []string{"Cloudflare"}},
 		{name: "non authorization error", server: "cloudflare", required: []string{"cloudflare"}, error: `{"message":"temporary upstream failure"}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -253,4 +256,35 @@ func TestCodexMCPLoginHandoffExplainsPrivateConfiguration(t *testing.T) {
    if strings.Contains(result.NextAction, secret) { t.Fatalf("handoff disclosed configuration: %s", result.NextAction) }
   }
  }
+}
+
+func TestCodexMCPInventoryRequiresExactConfigurationKey(t *testing.T) {
+ for _, name := range []string{"cloudflare", "Cloudflare", "CLOUDFLARE"} {
+  t.Run(name, func(t *testing.T) {
+   dir := t.TempDir()
+   bin := writeFakeCodex(t, dir, "#!/bin/sh\nprintf '%s\\n' '[{\"name\":\""+name+"\"}]'\n", "@echo off\r\necho [{\"name\":\""+name+"\"}]\r\n")
+   ca := &codexAgent{bin: bin}
+   args, err := ca.mcpStageArgs(context.Background(), RunOpts{CWD: dir, ManageMCPAvailability: true})
+   if err != nil { t.Fatal(err) }
+   if (len(args) != 0) != (name == "cloudflare") { t.Fatalf("inventory name=%s overrides=%v", name, args) }
+  })
+ }
+}
+
+func TestCodexMCPReadinessRequiresExactConfigurationKey(t *testing.T) {
+ if runtime.GOOS == "windows" { t.Skip("fake app-server uses a POSIX shell") }
+ dir := t.TempDir()
+ bin := writeFakeCodex(t, dir, `#!/bin/sh
+while IFS= read -r request; do
+ case "$request" in
+  *'"id":1,'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+  *'"id":2,'*) printf '%s\n' '{"id":2,"result":{"thread":{"id":"probe-thread"}}}' ;;
+  *'"id":3,'*) printf '%s\n' '{"id":3,"result":{"data":[{"name":"Cloudflare","runtimeStatus":"connected","authStatus":"oAuth"}]}}' ;;
+ esac
+done
+`, "")
+ ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+ defer cancel()
+ result, err := runCodexMCPAppServer(ctx, bin, dir, nil, gitSafeEnv(dir))
+ if err != nil || result.Status != types.MCPStatusDeclaredNotAuthorized { t.Fatalf("readiness for an alternate key=%+v err=%v", result, err) }
 }

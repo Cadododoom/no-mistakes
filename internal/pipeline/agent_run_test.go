@@ -1194,3 +1194,17 @@ func TestRunAgent_RequiredMCPSurvivesExecutorWrappers(t *testing.T) {
  if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil { t.Fatal(err) }
  if calls != 2 { t.Fatalf("authorized invocations=%d", calls) }
 }
+
+func TestRunAgent_HonorsLongConfiguredInvocationBudget(t *testing.T) {
+ for _, duration := range []time.Duration{2*time.Hour, 12*time.Hour} {
+  started := time.Now()
+  ag := &hangingAgent{name: "budget", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+   deadline, ok := ctx.Deadline()
+   remaining := deadline.Sub(started)
+   if !ok || remaining < duration || remaining > duration+time.Second { t.Fatalf("deadline=%s want budget=%s", remaining, duration) }
+   return &agent.Result{Text: "done"}, nil
+  }}
+  sctx := &StepContext{Ctx: context.Background(), Agent: ag, Config: &config.Config{AgentTimeout: duration}}
+  if _, err := sctx.RunAgent(agent.RunOpts{}); err != nil { t.Fatal(err) }
+ }
+}

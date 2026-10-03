@@ -133,17 +133,24 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// genuine doubt still leaves the code alone and reports the finding
 	// unresolved.
 	var fixSummary string
-	if sctx.Fixing && !sctx.SkipFixExecution && onlyMCPAuthorizationFindings(sctx.PreviousFindings) {
-		sctx.Log("retrying Review without a repair turn after MCP authorization; re-probing before agent work...")
-		fixSummary = NoChangesAppliedSummary
-	} else if sctx.Fixing && !sctx.SkipFixExecution {
-		if onlyReviewInvocationRecoveryFindings(sctx.PreviousFindings) {
-			// A timeout/exit finding asks for a fresh Review attempt, not a code
-			// repair. Preserve partial work from the interrupted invocation using
-			// the ordinary protected-path and custody checks before rereviewing.
-			sctx.Log("retrying Review without a repair turn; preserving interrupted work...")
+ if sctx.Fixing && !sctx.SkipFixExecution {
+  if onlyMCPAuthorizationFindings(sctx.PreviousFindings) || onlyReviewInvocationRecoveryFindings(sctx.PreviousFindings) {
+   sctx.Log("retrying Review without a repair turn; preserving interrupted work...")
+   if rebaseInProgress(sctx.Ctx, sctx.WorkDir) || mergeInProgress(sctx.Ctx, sctx.WorkDir) {
+    return nil, fmt.Errorf("cannot prepare interrupted Review work while a rebase or merge is unfinished")
+   }
 			committed, err := commitAgentFixesWithResult(sctx, s.Name(), "resume interrupted review", "resume review")
 			if err != nil {
+    if refusal := pipeline.ProtectedPathOutcome(err); refusal != nil {
+     findings, _ := types.ParseFindingsJSON(refusal.Findings)
+     baseline := interruptedWorkBaseline(sctx)
+     findings.UnvalidatedSinceSHA = baseline
+     if finding := interruptedWorkFinding(sctx, s.Name(), baseline); finding != nil {
+      findings.Items = append(findings.Items, *finding)
+     }
+     refusal.Findings, _ = types.MarshalFindingsJSON(findings)
+     return refusal, nil
+    }
 				return nil, err
 			}
 			fixSummary = fixResultSummary(committed)
@@ -1013,7 +1020,7 @@ func (s *ReviewStep) runReviewAgent(sctx *pipeline.StepContext, prefix string, r
 
 func reviewAgentTimeout(cfg *config.Config) time.Duration {
 	if cfg != nil && cfg.ReviewAgentTimeout > 0 {
-		return config.BoundAgentInvocationTimeout(cfg.ReviewAgentTimeout, config.DefaultReviewAgentTimeout)
+		return cfg.ReviewAgentTimeout
 	}
 	return config.DefaultReviewAgentTimeout
 }

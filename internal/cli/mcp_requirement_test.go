@@ -41,7 +41,7 @@ func TestMCPRequirementFlagsAndPushOptionsRoundTrip(t *testing.T) {
 		{Stage: types.StepReview, Server: "cloudflare"},
 		{Stage: types.StepTest, Server: "cloudflare"},
 	}
-	got, err := parseMCPRequirementFlags([]string{"test:cloudflare", "review:Cloudflare"})
+	got, err := parseMCPRequirementFlags([]string{"test:cloudflare", "review:cloudflare"})
 	if err != nil {
 		t.Fatalf("parseMCPRequirementFlags: %v", err)
 	}
@@ -62,7 +62,8 @@ func TestMCPRequirementFlagsRejectUnsupportedAndDuplicateDependencies(t *testing
 	for _, values := range [][]string{
 		{"lint:cloudflare"},
 		{"review:other"},
-		{"review:cloudflare", "review:Cloudflare"},
+		{"review:Cloudflare"},
+		{"review:cloudflare", "review:cloudflare"},
 	} {
 		if _, err := parseMCPRequirementFlags(values); err == nil {
 			t.Fatalf("parseMCPRequirementFlags(%q) succeeded, want validation error", values)
