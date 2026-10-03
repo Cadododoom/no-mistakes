@@ -624,3 +624,19 @@ func interruptedWorkFinding(sctx *pipeline.StepContext, stage types.StepName, ba
  }
  return nil
 }
+
+func (s *ReviewStep) InterruptedWorkFindings(sctx *pipeline.StepContext) (string, error) {
+ return interruptedWorkFindings(sctx, s.Name())
+}
+
+func (s *TestStep) InterruptedWorkFindings(sctx *pipeline.StepContext) (string, error) {
+ return interruptedWorkFindings(sctx, s.Name())
+}
+
+func interruptedWorkFindings(sctx *pipeline.StepContext, stage types.StepName) (string, error) {
+ baseline := interruptedWorkBaseline(sctx)
+ finding := interruptedWorkFinding(sctx, stage, baseline)
+ if finding == nil { return "", nil }
+ findings := types.Findings{Items: []types.Finding{*finding}, UnvalidatedSinceSHA: baseline}
+ return types.MarshalFindingsJSON(findings)
+}
