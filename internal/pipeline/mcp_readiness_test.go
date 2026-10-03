@@ -88,8 +88,12 @@ func TestExecutor_PrelaunchMCPReadiness(t *testing.T) {
    }
    if err != nil { t.Fatal(err) }
    expectedCalls := 3
+   expectedProbes := 6
+   // Resume re-emits the durable gate before retrying; it does not probe
+   // while the operator's prerequisite decision is still outstanding.
+   if mode == "recovered" { expectedProbes = 4 }
    if mode == "skipped-first-step" { expectedCalls = 2 }
-   if calls != expectedCalls || gates != 2 || probes != 6 { t.Fatalf("calls=%d gates=%d probes=%d", calls, gates, probes) }
+   if calls != expectedCalls || gates != 2 || probes != expectedProbes { t.Fatalf("calls=%d gates=%d probes=%d", calls, gates, probes) }
   })
  }
 }

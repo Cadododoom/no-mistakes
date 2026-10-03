@@ -43,7 +43,7 @@ func TestGracefulShutdownPreservesDurableGatesAndWork(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			sf := func() []pipeline.Step { return []pipeline.Step{shutdownRecoveryStep{stage: tc.stage}} }
-			p, database := startTestDaemonWithSteps(t, sf)
+			p, database, stopped := startTestDaemonWithStepsAndStopSignal(t, sf)
 			repo, head := setupTestGitRepo(t, p, database, "shutdown-recovery")
 			client, err := ipc.Dial(p.Socket())
 			if err != nil {
@@ -94,6 +94,13 @@ func TestGracefulShutdownPreservesDurableGatesAndWork(t *testing.T) {
 				t.Fatal(err)
 			}
 			client.Close()
+			// Socket removal precedes the deferred singleton-lock release.
+			// Wait for the actual shutdown before starting its replacement.
+			select {
+			case <-stopped:
+			case <-time.After(30 * time.Second):
+				t.Fatal("isolated daemon did not finish shutdown")
+			}
 			deadline := time.Now().Add(30 * time.Second)
 			for {
 				if _, err := os.Stat(p.Socket()); os.IsNotExist(err) {
