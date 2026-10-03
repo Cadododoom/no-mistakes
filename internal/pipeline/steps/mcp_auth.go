@@ -67,7 +67,18 @@ func mcpAuthorizationOutcome(sctx *pipeline.StepContext, stage types.StepName, s
 	if duringToolAttempt && sctx != nil && sctx.Log != nil {
 		sctx.Log(fmt.Sprintf("MCP cloudflare: %s for %s in %s", status.Status, stage, status.ExecutorContext))
 	}
-	return pipeline.MCPAuthorizationOutcome(stage, status, false)
+	outcome := pipeline.MCPAuthorizationOutcome(stage, status, false)
+ if sctx == nil || sctx.Run == nil || sctx.WorkDir == "" {
+  return outcome
+ }
+ baseline := interruptedWorkBaseline(sctx)
+ findings, _ := types.ParseFindingsJSON(outcome.Findings)
+ findings.UnvalidatedSinceSHA = baseline
+ if finding := interruptedWorkFinding(sctx, stage, baseline); finding != nil {
+  findings.Items = append(findings.Items, *finding)
+ }
+ outcome.Findings, _ = types.MarshalFindingsJSON(findings)
+ return outcome
 }
 
 func onlyMCPAuthorizationFindings(raw string) bool {
@@ -75,12 +86,17 @@ func onlyMCPAuthorizationFindings(raw string) bool {
 	if err != nil || len(findings.Items) == 0 {
 		return false
 	}
-	for _, finding := range findings.Items {
-		if finding.Category != types.FindingCategoryMCPAuthorization && finding.AuthorizationRequired == nil {
-			return false
-		}
-	}
-	return true
+ authorization := false
+ for _, finding := range findings.Items {
+  if finding.Category == types.FindingCategoryMCPAuthorization || finding.AuthorizationRequired != nil {
+   authorization = true
+   continue
+  }
+  if finding.ID != types.FindingIDReviewAgentUnvalidatedWork && finding.ID != types.FindingIDTestAgentUnvalidatedWork {
+   return false
+  }
+ }
+ return authorization
 }
 
 func mcpAuthorizationStatusFromError(err error) (types.MCPProbeResult, bool) {
@@ -91,4 +107,23 @@ func mcpAuthorizationStatusFromError(err error) (types.MCPProbeResult, bool) {
 	return types.MCPProbeResult{
 		Status: types.MCPStatusAuthorizationRequiredDuringTool,
 	}, true
+}
+
+func interruptedWorkBaseline(sctx *pipeline.StepContext) string {
+ for _, raw := range []string{sctx.PreviousFindings, sctx.DeferredFindings} {
+  findings, err := types.ParseFindingsJSON(raw)
+  if err != nil {
+   continue
+  }
+  if findings.UnvalidatedSinceSHA != "" {
+   return findings.UnvalidatedSinceSHA
+  }
+  if findings.TestedHeadSHA != "" {
+   return findings.TestedHeadSHA
+  }
+ }
+ if sctx.ReviewStartingHeadSHA != "" {
+  return sctx.ReviewStartingHeadSHA
+ }
+ return sctx.Run.HeadSHA
 }

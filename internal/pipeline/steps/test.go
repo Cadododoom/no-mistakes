@@ -665,7 +665,7 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 		validatedHead = startHead
 	}
 	park.UnvalidatedSinceSHA = validatedHead
-	if work := unvalidatedTestWork(sctx, validatedHead); work != "" {
+	if work := unvalidatedAgentWork(sctx, types.StepTest, validatedHead); work != "" {
 		items = append(items, Finding{
 			ID:          types.FindingIDTestAgentUnvalidatedWork,
 			Severity:    types.FindingSeverityError,
@@ -820,45 +820,6 @@ func testRepairFindings(raw string) string {
 	return encoded
 }
 
-// unvalidatedTestWork names what the worktree holds beyond validatedHead - the
-// head the last completed evidence turn saw, else the head an earlier cut in
-// this fix chain measured from, else this execution's start -
-// with how to inspect it, or returns "" when there is nothing. A commit the
-// timed-out agent made is recorded as the run head so custody sees it, unless
-// an unfinished rebase or merge makes HEAD a partial result. An unreadable HEAD
-// or status fails closed.
-func unvalidatedTestWork(sctx *pipeline.StepContext, validatedHead string) string {
-	dir := sctx.WorkDir
-	var parts []string
-	head, err := stepGitHeadSHA(sctx)
-	switch {
-	case err != nil:
-		parts = append(parts, fmt.Sprintf("a HEAD that could not be read (%v)", err))
-	case rebaseInProgress(sctx.Ctx, dir) || mergeInProgress(sctx.Ctx, dir):
-		parts = append(parts, fmt.Sprintf("an unfinished rebase or merge at %s, not recorded as the run head (inspect with `git -C %s status`)", shortObjectID(head), dir))
-	case head != validatedHead:
-		where := "recorded locally as the run head and not pushed"
-		if head != sctx.Run.HeadSHA {
-			if recErr := recordAgentFixHead(sctx, types.StepTest, head); recErr != nil {
-				sctx.Log(fmt.Sprintf("warning: could not record timed-out test agent head %s: %v", head, recErr))
-				where = "left in the run worktree"
-			}
-		}
-		parts = append(parts, fmt.Sprintf("commits %s..%s, %s (inspect with `git -C %s log -p %s..%s`)", shortObjectID(validatedHead), shortObjectID(head), where, dir, validatedHead, head))
-	}
-	status, err := stepGitRunRaw(sctx, "status", "--porcelain")
-	if err != nil {
-		parts = append(parts, fmt.Sprintf("a worktree status that could not be read (%v)", err))
-	} else if changed := porcelainPaths(status); len(changed) > 0 {
-		const maxNamed = 10
-		named := strings.Join(changed[:min(len(changed), maxNamed)], ", ")
-		if len(changed) > maxNamed {
-			named += fmt.Sprintf(" and %d more", len(changed)-maxNamed)
-		}
-		parts = append(parts, fmt.Sprintf("uncommitted changes to %s (inspect with `git -C %s status` and `git -C %s diff`)", named, dir, dir))
-	}
-	return strings.Join(parts, "; ")
-}
 
 func porcelainPaths(status string) []string {
 	var paths []string

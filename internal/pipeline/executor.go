@@ -2342,3 +2342,11 @@ func (e *Executor) ReviewConversationAnswerDir(runID string) string {
 	}
 	return dir
 }
+
+func (a *gateStepBoundaryAgent) SupportsMCP(server, purpose string) bool {
+ return agent.SupportsMCP(a.inner, server, purpose)
+}
+
+func (a *lifecycleAgent) SupportsMCP(server, purpose string) bool {
+ return agent.SupportsMCP(a.inner, server, purpose)
+}

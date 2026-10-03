@@ -27,10 +27,10 @@ type fakeMCPReadinessProber struct {
 func TestReviewMCPAuthorizationRetryReprobesBeforeLaunchingAgent(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	agentCalls := 0
-	ag := &mockAgent{name: "mock", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+	ag := &mcpTestAgent{mockAgent: &mockAgent{name: "mock", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		agentCalls++
 		return &agent.Result{Output: json.RawMessage(`{"findings":[],"reviewed_paths":["feature.txt"],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}, nil
-	}}
+	}}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Run.RequiredMCPJSON = `[{"stage":"review","server":"cloudflare"}]`
 	prober := &fakeMCPReadinessProber{result: types.MCPProbeResult{Status: types.MCPStatusAuthorizationRequiredDuringProbe}}
@@ -105,13 +105,11 @@ func TestMCPPreflight_MissingAuthorizationReturnsTypedGate(t *testing.T) {
 		NextAction:      "CODEX_HOME='/daemon/.codex' codex mcp login cloudflare --no-browser",
 	}}
 	var logs []string
-	sctx := &pipeline.StepContext{
-		Ctx:       context.Background(),
-		Run:       &db.Run{RequiredMCPJSON: requiredJSON},
-		WorkDir:   "/run/worktree",
-		MCPProber: prober,
-		Log:       func(line string) { logs = append(logs, line) },
-	}
+ dir, base, head := setupGitRepo(t)
+ sctx := newTestContextWithDBRecords(t, nil, dir, base, head, config.Commands{})
+ sctx.Run.RequiredMCPJSON = requiredJSON
+ sctx.MCPProber = prober
+ sctx.Log = func(line string) { logs = append(logs, line) }
 
 	outcome, parked, err := mcpPreflightOutcome(sctx, types.StepReview)
 	if err != nil || !parked || outcome == nil || !outcome.NeedsApproval {
@@ -178,4 +176,10 @@ func TestMCPToolAuthorizationFailureHasDistinctTypedOutcome(t *testing.T) {
 	if findings.Items[0].AuthorizationRequired.Status != types.MCPStatusAuthorizationRequiredDuringTool {
 		t.Fatalf("tool-attempt handoff = %+v", findings.Items[0].AuthorizationRequired)
 	}
+}
+
+type mcpTestAgent struct { *mockAgent }
+
+func (a *mcpTestAgent) SupportsMCP(server, _ string) bool {
+ return server == "cloudflare"
 }

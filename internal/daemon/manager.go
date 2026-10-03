@@ -183,6 +183,14 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, err
 	}
+ requirements, err := run.MCPRequirements()
+ if err == nil {
+  err = agent.ValidateMCPRequirements(ag, requirements)
+ }
+ if err != nil {
+  _ = ag.Close()
+  return nil, err
+ }
 	if cfg.SessionReuse {
 		if err := validateRecoveredSessionProviders(m.db, run.ID, ag); err != nil {
 			_ = ag.Close()
@@ -1692,6 +1700,13 @@ func (m *RunManager) startRunWithIntentSourceLockedWithMCP(ctx context.Context, 
 		trackStartFailure("create_agent")
 		return "", err
 	}
+
+ if err := agent.ValidateMCPRequirements(ag, requiredMCP); err != nil {
+  _ = ag.Close()
+  m.db.UpdateRunError(run.ID, err.Error())
+  trackStartFailure("mcp_adapter_support")
+  return "", err
+ }
 
 	// Configuration decides this run's gates exactly once, here, and the
 	// resolved list is recorded before the executor can write a single step
