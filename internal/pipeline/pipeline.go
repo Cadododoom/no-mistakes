@@ -129,6 +129,67 @@ type StepContext struct {
 	// OnPRMerged is a best-effort hook after a merged PR state is persisted.
 	// Eval uses it to relabel auto-fix/shipped-unfixed gold; nil is a no-op.
 	OnPRMerged func(ctx context.Context, runID string)
+	// ClosingIssueRefs are the explicit --closes values claimed from the DB at
+	// PR-step start. Steps read this snapshot instead of mutable run state.
+	ClosingIssueRefs []string
+}
+
+// MCPReadinessProber inspects authorization through the same Codex process
+// environment the daemon uses for pipeline agents. Implementations must return
+// only safe status and login instructions, never raw server output.
+type MCPReadinessProber interface {
+	ProbeMCP(context.Context, string, string) (types.MCPProbeResult, error)
+}
+
+func (sctx *StepContext) MCPReadiness(stage types.StepName, server string) (bool, types.MCPProbeResult, error) {
+	result := types.MCPProbeResult{Status: types.MCPStatusDisabled}
+	if sctx == nil || sctx.Run == nil {
+		return false, result, nil
+	}
+	requirements, err := sctx.Run.MCPRequirements()
+	if err != nil {
+		return false, types.MCPProbeResult{Status: types.MCPStatusDeclaredNotAuthorized}, err
+	}
+	required := false
+	for _, requirement := range requirements {
+		if requirement.Stage == stage && strings.EqualFold(requirement.Server, server) {
+			required = true
+			break
+		}
+	}
+	if !required {
+		return false, result, nil
+	}
+	result = types.MCPProbeResult{Status: types.MCPStatusDeclaredNotAuthorized, ExecutorContext: "daemon Codex executor context"}
+	if sctx.MCPProber == nil {
+		return true, result, nil
+	}
+	probed, err := sctx.MCPProber.ProbeMCP(sctx.Ctx, sctx.WorkDir, server)
+	if err != nil {
+		// The raw error can contain server output or configuration details. A
+		// required dependency remains parked with a bounded status instead.
+		if probed.ExecutorContext != "" {
+			result.ExecutorContext = probed.ExecutorContext
+		}
+		if probed.NextAction != "" {
+			result.NextAction = probed.NextAction
+		}
+		return true, result, nil
+	}
+	if probed.ExecutorContext == "" {
+		probed.ExecutorContext = result.ExecutorContext
+	}
+	if probed.NextAction == "" {
+		probed.NextAction = defaultMCPLoginAction(server)
+	}
+	if probed.Status != types.MCPStatusAuthorized && probed.Status != types.MCPStatusAuthorizationRequiredDuringProbe {
+		probed.Status = types.MCPStatusDeclaredNotAuthorized
+	}
+	return true, probed, nil
+}
+
+func defaultMCPLoginAction(server string) string {
+	return "Run `codex mcp login " + server + " --no-browser` in the daemon's Codex executor context, then retry."
 }
 
 // MCPReadinessProber inspects authorization through the same Codex process
@@ -197,7 +258,7 @@ func defaultMCPLoginAction(server string) string {
 // from the session that prescribed the fixes under review. Every other agent
 // invocation goes through RunAgent.
 func (sctx *StepContext) RunAgentSession(role SessionRole, opts agent.RunOpts) (*agent.Result, error) {
-	return sctx.runAgent(sctx.Ctx, opts, role)
+	return sctx.runAgent(sctx.Ctx, opts, role, 0, 0, nil)
 }
 
 // StepOutcome is the result of executing a pipeline step.

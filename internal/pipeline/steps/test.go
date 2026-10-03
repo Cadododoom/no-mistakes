@@ -114,27 +114,31 @@ Rules:
 Previous test findings to address:
 ` + sanitizedPreviousFindingsForPrompt(repair)
 		}
-		fixCtx, cancelFix, fixTimeout := testAgentContext(sctx)
+		fixTimeout := testAgentTimeout(sctx)
 		summary, err := executeFixMode(sctx, s.Name(), fixExecutionOptions{
 			LogMessage:      "asking agent to fix test failures...",
 			Prompt:          fixPrompt,
 			FallbackSummary: "fix test failures",
-			AgentContext:    fixCtx,
+			RunAgent: func(runOpts agent.RunOpts) (*agent.Result, error) {
+				result, runErr := sctx.RunAgentBudget(sctx.Ctx, fixTimeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, runOpts)
+				if runErr != nil {
+					return nil, testAgentError(fixTimeout, "agent fix tests", runErr)
+				}
+				return result, nil
+			},
 			AfterAgentRun: func(*agent.Result) error {
 				newTestsFromFix = detectNewTestFiles(ctx, sctx.WorkDir)
 				return nil
 			},
 		})
-		cancelFix()
 		if err != nil {
 			if status, ok := mcpAuthorizationStatusFromError(err); ok {
 				return mcpAuthorizationOutcome(sctx, s.Name(), status, true), nil
 			}
-			runErr := testAgentError(fixCtx, fixTimeout, "agent fix tests", err)
-			if !errors.Is(runErr, errTestAgentTimeout) && !isTestAgentProcessExit(runErr) {
-				return nil, runErr
+			if !errors.Is(err, errTestAgentTimeout) && !isTestAgentProcessExit(err) {
+				return nil, err
 			}
-			repairCut = runErr
+			repairCut = err
 		}
 		fixSummary = summary
 	}
@@ -388,19 +392,17 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 				testAnalyzerMaxAttempts,
 			))
 		}
-		evidenceCtx, cancel, timeout := testAgentContext(sctx)
-		result, err := sctx.RunAgentContext(evidenceCtx, agent.RunOpts{
+		timeout := testAgentTimeout(sctx)
+		result, err := sctx.RunAgentBudget(sctx.Ctx, timeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, agent.RunOpts{
 			Prompt:     current,
 			CWD:        sctx.WorkDir,
 			JSONSchema: testFindingsSchema,
 			OnChunk:    sctx.LogChunk,
 		})
-		runErr := testAgentError(evidenceCtx, timeout, "agent run tests", err)
-		if runErr != nil && (context.Cause(evidenceCtx) != nil || !agent.IsStructuredOutputRejected(runErr)) {
-			cancel()
+		runErr := testAgentError(timeout, "agent run tests", err)
+		if runErr != nil && (errors.Is(runErr, errTestAgentTimeout) || sctx.Ctx.Err() != nil || !agent.IsStructuredOutputRejected(runErr)) {
 			return Findings{}, runErr
 		}
-		cancel()
 
 		var valErr error
 		if runErr != nil {
@@ -602,11 +604,26 @@ func mergeNewTestFiles(fromFix, fromEvidence []string) []string {
 	return merged
 }
 
-func testAgentContext(sctx *pipeline.StepContext) (context.Context, context.CancelFunc, time.Duration) {
-	timeout := config.DefaultTestAgentTimeout
+func testAgentTimeout(sctx *pipeline.StepContext) time.Duration {
 	if sctx != nil && sctx.Config != nil && sctx.Config.TestAgentTimeout > 0 {
-		timeout = sctx.Config.TestAgentTimeout
+		return sctx.Config.TestAgentTimeout
 	}
+	return config.DefaultTestAgentTimeout
+}
+
+func testAgentWorkingTimeout(sctx *pipeline.StepContext) time.Duration {
+	if sctx == nil || sctx.Config == nil {
+		return 0
+	}
+	return sctx.Config.TestAgentWorkingTimeout
+}
+
+// testAgentContext bounds the base-checkout prepare and test commands by
+// test_agent_timeout. The deadline is a child of the step context, so agent
+// turns still receive a stall budget from RunAgentBudget instead of inheriting
+// an absolute parent deadline.
+func testAgentContext(sctx *pipeline.StepContext) (context.Context, context.CancelFunc, time.Duration) {
+	timeout := testAgentTimeout(sctx)
 	ctx, cancel := context.WithTimeoutCause(sctx.Ctx, timeout, errTestAgentTimeout)
 	return ctx, cancel, timeout
 }
@@ -614,7 +631,7 @@ func testAgentContext(sctx *pipeline.StepContext) (context.Context, context.Canc
 var errTestAgentTimeout = errors.New("test agent timeout")
 
 // testAgentTimeoutOutcome parks the Test step when an evidence or repair
-// invocation burned its wall-clock budget. A budget cut is not a code
+// invocation burned its stall budget. A budget cut is not a code
 // failure: the run stays alive with the worktree so leftover commits and
 // uncommitted files are not discarded, and an approval is a Test exception
 // rather than a silent green pass. Late structured output from the expired
@@ -817,9 +834,9 @@ func porcelainPaths(status string) []string {
 
 // testAgentError records bounded activity evidence for a timed-out Test turn
 // and an exit status for a process that terminated before a complete result.
-func testAgentError(ctx context.Context, timeout time.Duration, prefix string, err error) error {
-	if timeout > 0 && (errors.Is(context.Cause(ctx), errTestAgentTimeout) || errors.Is(err, errTestAgentTimeout)) {
-		return &testAgentInvocationError{prefix: prefix, timeout: timeout, timedOut: true, evidence: testAgentObservation(err), cause: errors.Join(errTestAgentTimeout, err)}
+func testAgentError(timeout time.Duration, prefix string, err error) error {
+	if timeout > 0 && errors.Is(err, errTestAgentTimeout) {
+		return &testAgentInvocationError{prefix: prefix, timeout: timeout, timedOut: true, bound: pipeline.AgentBudgetBound(err, timeout), evidence: testAgentObservation(err), cause: errors.Join(errTestAgentTimeout, err)}
 	}
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -836,13 +853,14 @@ type testAgentInvocationError struct {
 	timeout  time.Duration
 	exitCode int
 	timedOut bool
+	bound    string
 	evidence string
 	cause    error
 }
 
 func (e *testAgentInvocationError) Error() string {
 	if e.timedOut {
-		message := fmt.Sprintf("%s timed out after %s", e.prefix, e.timeout)
+		message := fmt.Sprintf("%s timed out %s", e.prefix, e.bound)
 		if e.evidence != "" {
 			message += "; " + e.evidence
 		}
