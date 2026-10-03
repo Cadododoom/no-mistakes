@@ -45,7 +45,7 @@ func TestReviewMCPAuthorizationRetryReprobesBeforeLaunchingAgent(t *testing.T) {
 			t.Errorf("authorization gate launched work: agent calls %d, probes %d", agentCalls, prober.calls)
 		}
 		prober.result.Status = types.MCPStatusAuthorized
-		if err := executor.Respond(types.StepReview, types.ActionFix, []string{types.FindingIDMCPAuthorizationRequired}); err != nil {
+		if err := executor.Respond(types.StepReview, types.ActionFix, nil); err != nil {
 			t.Error(err)
 		}
 	})
@@ -55,7 +55,7 @@ func TestReviewMCPAuthorizationRetryReprobesBeforeLaunchingAgent(t *testing.T) {
 	if err := executor.Execute(ctx, sctx.Run, sctx.Repo, dir); err != nil {
 		t.Fatal(err)
 	}
-	if gateCount != 1 || prober.calls != 2 || agentCalls != 1 {
+	if gateCount != 1 || prober.calls != 3 || agentCalls != 1 {
 		t.Fatalf("gates=%d probes=%d agent calls=%d, want parked preflight then one authorized attempt", gateCount, prober.calls, agentCalls)
 	}
 }

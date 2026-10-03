@@ -67,26 +67,7 @@ func mcpAuthorizationOutcome(sctx *pipeline.StepContext, stage types.StepName, s
 	if duringToolAttempt && sctx != nil && sctx.Log != nil {
 		sctx.Log(fmt.Sprintf("MCP cloudflare: %s for %s in %s", status.Status, stage, status.ExecutorContext))
 	}
-	description := fmt.Sprintf("The %s stage is parked because Cloudflare MCP authorization is required in the daemon Codex executor context. Authorize that context, then respond with fix to re-probe and resume the stage.", stage)
-	payload, _ := types.MarshalFindingsJSON(types.Findings{
-		Summary: "Required MCP authorization is unavailable",
-		Items: []types.Finding{{
-			ID:          types.FindingIDMCPAuthorizationRequired,
-			Severity:    types.FindingSeverityWarning,
-			Action:      types.ActionAskUser,
-			Category:    types.FindingCategoryMCPAuthorization,
-			Description: description,
-			AuthorizationRequired: &types.MCPAuthorizationRequired{
-				Provider:        "cloudflare",
-				Server:          "cloudflare",
-				Stage:           string(stage),
-				Status:          status.Status,
-				ExecutorContext: status.ExecutorContext,
-				NextAction:      status.NextAction,
-			},
-		}},
-	})
-	return &pipeline.StepOutcome{NeedsApproval: true, Findings: payload}
+	return pipeline.MCPAuthorizationOutcome(stage, status, false)
 }
 
 func onlyMCPAuthorizationFindings(raw string) bool {
