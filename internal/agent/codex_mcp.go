@@ -73,7 +73,7 @@ func codexMCPConfigArgs(args []string) []string {
 				i++
 			}
 		default:
-			if strings.HasPrefix(arg, "--config=") || strings.HasPrefix(arg, "--profile=") {
+			if strings.HasPrefix(arg, "--config=") || strings.HasPrefix(arg, "--profile=") || strings.HasPrefix(arg, "-c") || strings.HasPrefix(arg, "-p") {
 				out = append(out, arg)
 			}
 		}

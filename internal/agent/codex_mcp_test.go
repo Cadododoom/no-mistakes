@@ -239,6 +239,10 @@ func TestCodexMCPLoginHandoffExplainsPrivateConfiguration(t *testing.T) {
   {"--profile", "private-profile-name"},
   {"--config=mcp_servers.cloudflare.http_headers.Authorization=private-secret"},
   {"--ignore-user-config"},
+  {`-c=mcp_servers.cloudflare.url="https://different.example/mcp?token=private-secret"`},
+  {`-cmcp_servers.cloudflare.http_headers.Authorization="private-secret"`},
+  {"-p=private-profile-name"},
+  {"-pprivate-profile-name"},
  } {
   prober := NewCodexMCPProber("codex", selectors, runenv.Overlay{Set: map[string]string{"CODEX_HOME": "/daemon/.codex"}})
   prober.probe = func(_ context.Context, _, _ string, args, _ []string) (types.MCPProbeResult, error) {
@@ -287,4 +291,84 @@ done
  defer cancel()
  result, err := runCodexMCPAppServer(ctx, bin, dir, nil, gitSafeEnv(dir))
  if err != nil || result.Status != types.MCPStatusDeclaredNotAuthorized { t.Fatalf("readiness for an alternate key=%+v err=%v", result, err) }
+}
+
+func TestCodexMCPAttachedSelectorsUseExactExecutorConfiguration(t *testing.T) {
+ if runtime.GOOS == "windows" { t.Skip("fake configuration-aware Codex uses a POSIX shell") }
+ for _, tc := range []struct { name, selector, runtimeStatus, want string }{
+  {"config-equals-disable", "-c=mcp_servers.cloudflare.enabled=false", "disabled", types.MCPStatusDeclaredNotAuthorized},
+  {"config-attached-disable", "-cmcp_servers.cloudflare.enabled=false", "disabled", types.MCPStatusDeclaredNotAuthorized},
+  {"config-equals-url", `-c=mcp_servers.cloudflare.url="https://private.example/mcp?token=private-secret"`, "authenticationRequired", types.MCPStatusAuthorizationRequiredDuringProbe},
+  {"config-attached-url", `-cmcp_servers.cloudflare.url="https://private.example/mcp?token=private-secret"`, "authenticationRequired", types.MCPStatusAuthorizationRequiredDuringProbe},
+  {"profile-equals", "-p=private-profile", "authenticationRequired", types.MCPStatusAuthorizationRequiredDuringProbe},
+  {"profile-attached", "-pprivate-profile", "authenticationRequired", types.MCPStatusAuthorizationRequiredDuringProbe},
+ } {
+  for _, resume := range []bool{false, true} {
+   t.Run(fmt.Sprintf("%s/resume=%t", tc.name, resume), func(t *testing.T) {
+    dir := t.TempDir()
+    capture := filepath.Join(dir, "argv")
+    bin := writeFakeCodex(t, dir, `#!/bin/sh
+selected=false
+mode=inventory
+for arg do
+ if [ "$arg" = "$EXPECTED_SELECTOR" ]; then selected=true; fi
+ case "$arg" in app-server) mode=probe;; exec) mode=exec;; esac
+done
+printf '%s\n' "$@" > "$CAPTURE_PREFIX.$mode"
+case "$mode" in
+ inventory)
+  if "$selected"; then printf '%s\n' '[{"name":"cloudflare"}]'; else printf '%s\n' '[]'; fi
+  exit 0 ;;
+ exec)
+  printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}'
+  printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+  exit 0 ;;
+esac
+runtime=connected
+if "$selected"; then runtime="$CONFIGURED_RUNTIME"; fi
+while IFS= read -r request; do
+ case "$request" in
+  *'"id":1,'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+  *'"id":2,'*) printf '%s\n' '{"id":2,"result":{"thread":{"id":"probe-thread"}}}' ;;
+  *'"id":3,'*) printf '{"id":3,"result":{"data":[{"name":"cloudflare","runtimeStatus":"%s","authStatus":"oAuth"}]}}\n' "$runtime" ;;
+ esac
+done
+`, "")
+    environment := runenv.Overlay{Set: map[string]string{
+     "CAPTURE_PREFIX": capture,
+     "EXPECTED_SELECTOR": tc.selector,
+     "CONFIGURED_RUNTIME": tc.runtimeStatus,
+     "CODEX_HOME": filepath.Join(dir, "executor-home"),
+    }}
+    extraArgs := []string{tc.selector, "--model", "unrelated-model"}
+    prober := NewCodexMCPProber(bin, extraArgs, environment)
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    result, err := prober.ProbeMCP(ctx, dir, "cloudflare")
+    if err != nil || result.Status != tc.want { t.Fatalf("runtime readiness=%+v err=%v want=%s", result, err, tc.want) }
+    if !strings.Contains(result.NextAction, "apply them privately to the login command") { t.Fatalf("missing private configuration handoff: %s", result.NextAction) }
+    for _, private := range []string{tc.selector, "private-secret", "private.example", "private-profile"} {
+     if strings.Contains(result.NextAction, private) { t.Fatalf("login handoff exposed selector: %s", result.NextAction) }
+    }
+    ca := &codexAgent{bin: bin, extraArgs: extraArgs, subprocessContext: newSubprocessContext(environment)}
+    overrides, err := ca.mcpStageArgs(ctx, RunOpts{CWD: dir, ManageMCPAvailability: true})
+    if err != nil || strings.Join(overrides, " ") != "-c mcp_servers.cloudflare.enabled=false" { t.Fatalf("inventory used another configuration: %q err=%v", overrides, err) }
+    opts := RunOpts{CWD: dir, Prompt: "test", ManageMCPAvailability: true, RequiredMCPServers: []string{"cloudflare"}}
+    if resume { opts.Session = &SessionRef{ID: "thread"} }
+    if _, err := ca.Run(ctx, opts); err != nil { t.Fatal(err) }
+    for _, mode := range []string{"inventory", "probe", "exec"} {
+     raw, err := os.ReadFile(capture+"."+mode)
+     if err != nil { t.Fatal(err) }
+     args := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+     count := 0
+     model := false
+     for _, arg := range args {
+      if arg == tc.selector { count++ }
+      if arg == "unrelated-model" { model = true }
+     }
+     if count != 1 || model != (mode == "exec") { t.Fatalf("%s argv=%q; want one exact selector and model only for execution", mode, args) }
+    }
+   })
+  }
+ }
 }
