@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -347,7 +348,9 @@ if "$selected"; then runtime="$CONFIGURED_RUNTIME"; fi
 while IFS= read -r request; do
  case "$request" in
   *'"id":1,'*) printf '%s\n' '{"id":1,"result":{}}' ;;
-  *'"id":2,'*) printf '%s\n' '{"id":2,"result":{"thread":{"id":"probe-thread"}}}' ;;
+  *'"id":2,'*)
+   case "$request" in *'"mcp_servers.cloudflare"'*) runtime="$CONFIGURED_RUNTIME";; esac
+   printf '%s\n' '{"id":2,"result":{"thread":{"id":"probe-thread"}}}' ;;
   *'"id":3,'*) printf '{"id":3,"result":{"data":[{"name":"cloudflare","runtimeStatus":"%s","authStatus":"oAuth"}]}}\n' "$runtime" ;;
  esac
 done
@@ -416,5 +419,64 @@ done
 				}
 			})
 		}
+	}
+}
+
+func TestCodexMCPProfileCredentialsTravelOverStdio(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake app-server uses a POSIX shell")
+	}
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "capture")
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+for arg do
+ if [ "$arg" = "get" ]; then
+  printf '%s\n' '{"name":"cloudflare","enabled":true,"transport":{"type":"streamable_http","url":"https://example.invalid/?token=url-secret","http_headers":{"Authorization":"header-secret"},"env_http_headers":{"X-Key":"KEY_ENV"}}}'
+  exit 0
+ fi
+done
+printf '%s\n' "$@" > "$CAPTURE.argv"
+while IFS= read -r request; do
+ case "$request" in
+  *'"id":1,'*) printf '%s\n' '{"id":1,"result":{}}';;
+  *'"id":2,'*) printf '%s\n' "$request" > "$CAPTURE.request"; printf '%s\n' '{"id":2,"result":{"thread":{"id":"probe"}}}';;
+  *'"id":3,'*) printf '%s\n' '{"id":3,"result":{"data":[{"name":"cloudflare","runtimeStatus":"connected"}]}}';;
+ esac
+done
+`, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := runCodexMCPAppServer(ctx, bin, dir, []string{"-p", "selected"}, append(gitSafeEnv(dir), "CAPTURE="+capture))
+	if err != nil || result.Status != types.MCPStatusAuthorized {
+		t.Fatalf("probe=%+v err=%v", result, err)
+	}
+	argv, err := os.ReadFile(capture + ".argv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"url-secret", "header-secret", "example.invalid", "KEY_ENV"} {
+		if strings.Contains(string(argv), secret) {
+			t.Fatalf("connection field leaked into argv: %s", argv)
+		}
+	}
+	raw, err := os.ReadFile(capture + ".request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		Params struct {
+			Config map[string]struct {
+				URL        string            `json:"url"`
+				Headers    map[string]string `json:"http_headers"`
+				EnvHeaders map[string]string `json:"env_http_headers"`
+			} `json:"config"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(raw, &request); err != nil {
+		t.Fatal(err)
+	}
+	server := request.Params.Config["mcp_servers.cloudflare"]
+	if server.URL != "https://example.invalid/?token=url-secret" || server.Headers["Authorization"] != "header-secret" || server.EnvHeaders["X-Key"] != "KEY_ENV" {
+		t.Fatalf("stdio lost selected transport: %+v", server)
 	}
 }

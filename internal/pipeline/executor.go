@@ -1207,9 +1207,42 @@ rounds:
 				}
 			}
 			if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
-				return false, "", ErrDaemonShutdown
+				if stepName != types.StepReview && stepName != types.StepTest {
+					return false, "", ErrDaemonShutdown
+				}
+				// An executing turn has no durable gate yet. Use the ordinary
+				// round/park path below so startup can recover it without certifying
+				// interrupted work or losing the previous Test verdict and exit code.
+				stored, readErr := e.db.GetStepResult(sr.ID)
+				if readErr != nil {
+					return false, "", readErr
+				}
+				findings := ""
+				if stored.FindingsJSON != nil {
+					findings = *stored.FindingsJSON
+				}
+				findings = mergeFindingsJSON(findings, mergeFindingsJSON(sctx.PreviousFindings, sctx.DeferredFindings))
+				exitCode := finalExitCode
+				if stored.ExitCode != nil {
+					exitCode = *stored.ExitCode
+				}
+				if outcome != nil {
+					findings = mergeFindingsJSON(findings, outcome.Findings)
+					exitCode = outcome.ExitCode
+				}
+				interrupted, _ := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{{
+					ID: string(stepName) + "-agent-interrupted", Severity: types.FindingSeverityWarning,
+					Action:      types.ActionAskUser,
+					Description: "Daemon shutdown interrupted this validation turn. Retry with fix to validate retained work, or abort.",
+				}}})
+				outcome = &StepOutcome{NeedsApproval: true, Findings: mergeFindingsJSON(findings, interrupted), ExitCode: exitCode}
+				if carryFindings {
+					outstandingFindings = mergeFindingsJSON(outcome.Findings, outstandingFindings)
+				}
+				err = nil
+			} else {
+				err = context.Cause(ctx)
 			}
-			err = context.Cause(ctx)
 		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil

@@ -143,6 +143,15 @@ func TestExecutor_ActiveValidationCancellationRetainsWork(t *testing.T) {
 						t.Fatalf("shutdown: %v", err)
 					}
 					results, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+					if errors.Is(cause, pipeline.ErrDaemonShutdown) {
+						parked, readErr := sctx.DB.GetRun(sctx.Run.ID)
+						if readErr != nil || parked.Status != types.RunRunning || parked.AwaitingAgentSince == nil {
+							t.Fatalf("active shutdown is not resumable: %+v %v", parked, readErr)
+						}
+						if err := pipeline.ValidateRecoveredRun(sctx.DB, parked, []pipeline.Step{step}); err != nil {
+							t.Fatalf("interrupted turn cannot recover: %v", err)
+						}
+					}
 					if phase == "clean" {
 						if err != nil || len(results) != 1 {
 							t.Fatalf("results=%+v err=%v", results, err)
