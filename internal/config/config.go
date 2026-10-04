@@ -1199,10 +1199,10 @@ step_quiet_warning: "10m"
 
 # Invocation budget for one pipeline agent invocation that does not
 # install a more specific deadline (document, lint, rebase, PR, CI-fix, and
-# auto-fix). Review and Test use their own recoverable gate at the same limit.
+# auto-fix). Review and Test use their own budgets and recoverable gates.
 agent_timeout: "8h"
 
-# Optional still-working cap when using a shorter agent_timeout; maximum 8h.
+# Optional still-working cap; must be at least agent_timeout.
 # agent_working_timeout: "8h"
 
 # Invocation budget for one Review agent invocation. Each optional
@@ -1210,13 +1210,13 @@ agent_timeout: "8h"
 # expiry Review parks for a recoverable retry or abort and preserves work.
 review_agent_timeout: "8h"
 
-# Optional still-working cap when using a shorter review budget; maximum 8h.
+# Optional still-working cap; must be at least review_agent_timeout.
 # review_agent_working_timeout: "8h"
 
-# Maximum wall-clock time for one Test-step agent invocation, including the
+# Invocation budget for one Test-step agent invocation, including the
 # post-test evidence-gathering turn. A stalled test agent parks for a decision
-# instead of leaving the run active. Each invocation receives up to eight
-# hours; the default accommodates long local builds and live validation.
+# instead of leaving the run active. The eight-hour default accommodates
+# long local builds and live validation; longer positive budgets are honored.
 test_agent_timeout: "8h"
 
 # Optional still-working cap for Test. Unset means no extension past

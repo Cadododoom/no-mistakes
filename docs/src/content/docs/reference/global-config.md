@@ -609,7 +609,7 @@ It is global-only.
 
 Budget for **one** Review-step agent invocation. With a configured budget, a still-working turn can continue until `review_agent_working_timeout` when set, subject to the same idle rule as `agent_working_timeout` and its configured cap.
 The optional fixer gets the full configured limit, and its fresh, session-free independent rereviewer gets a new full limit of its own. Every later fixer and rereviewer does the same; no invocation inherits time spent by an earlier turn.
-The default is eight hours; explicitly configured longer budgets are honored. If an invocation reaches its configured deadline, or its process exits before returning a complete review, Review parks with measured activity or process-exit evidence. The worktree remains owned by the run; approval and skip are refused, and `fix` retries Review without a repair turn so interrupted changes receive a complete review before publication. Abort remains available; interrupted unvalidated work is retained for inspection even after cancellation and daemon startup cleanup.
+The default is eight hours; explicitly configured longer budgets are honored. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns interruption, retained-work, and retry behavior.
 
 |         |                        |
 | ------- | ---------------------- |
@@ -622,7 +622,7 @@ Active elapsed time, process ID, and last activity remain visible in `axi status
 
 ### review_agent_working_timeout
 
-Optional still-working cap for one Review invocation. Unset means the turn stops at [`review_agent_timeout`](#review_agent_timeout). Set, it must be at least that budget . The same 10-minute quiet stop as [`agent_working_timeout`](#agent_working_timeout) applies.
+Optional still-working cap for one Review invocation. Unset means the turn stops at [`review_agent_timeout`](#review_agent_timeout). Set, it must be at least that budget. The same 10-minute quiet stop as [`agent_working_timeout`](#agent_working_timeout) applies.
 
 |         |                        |
 | ------- | ---------------------- |
@@ -635,17 +635,9 @@ It is global-only.
 
 Stall budget for one Test-step agent invocation.
 The budget covers the post-test evidence-gathering turn, and a Test-repair turn gets its own budget of the same length.
-The default is eight hours; explicitly configured longer budgets are honored. When the deadline expires, the test agent is cancelled and the Test step parks for a decision with an ask-user finding rather than failing the run as a code defect. A process exit before complete evidence parks as `test-agent-incomplete` with an explicit retry action.
-Timeout findings include measured activity evidence without forwarding free-form adapter output.
-A late structured result from the expired turn is still not used as a successful Test pass.
-The park keeps the configured `commands.test` result from the same execution, so approving over a failing command is still recorded as a configured-command override.
-A cut fix round also keeps the findings of the gate it was answering, selected or not, and the last completed evidence turn's verdict, so approving it is recorded against that verdict.
-A commit the timed-out agent already made is recorded locally for custody and is not pushed, unless an unfinished rebase or merge leaves only a partial HEAD.
-While the run worktree holds uncommitted changes or commits past the head the last completed evidence turn saw (before one completes, past the head the first cut measured from, which each later park carries forward and measures again), the park names them with the commands to inspect them and approval is refused, because the steps after Test would commit and publish them.
-Otherwise approving the park is a Test exception (`passed-with-override`), not a silent green pass.
-A fix response spends another budget: a repair turn runs only for selected findings other than the budget cut itself, then validation re-runs over whatever the cut left.
-Guidance you attach to the budget-cut finding itself (`axi respond --instructions`, or `e` in the TUI) is given to that re-run validation.
-You can abort, or choose a shorter limit for a future run and retry.
+The default is eight hours; explicitly configured longer budgets are honored.
+Timeout diagnostics include measured activity evidence without forwarding free-form adapter output; a late structured result from the expired invocation cannot be used as a successful Test pass.
+The [Test step reference](/no-mistakes/reference/pipeline-steps/#test) owns interruption parks, preserved findings and evidence, approval restrictions, and retries.
 
 |         |                        |
 | ------- | ---------------------- |
@@ -654,7 +646,7 @@ You can abort, or choose a shorter limit for a future run and retry.
 
 Accepts any positive Go `time.ParseDuration` string, including values above `8h`.
 Non-positive values are rejected when loading the global config.
-With a shorter configured Test budget, output or a new live child extends the turn only when `test_agent_working_timeout` is set, under the same idle rule as `agent_working_timeout` ; `step_quiet_warning` does not cancel it. The step preserves any unvalidated work and requires a `fix` retry or `axi abort` after a cut.
+Output or a new live child extends the turn only when `test_agent_working_timeout` is set, under the same idle rule as [`agent_working_timeout`](#agent_working_timeout); `step_quiet_warning` does not cancel it.
 It bounds only the Test step, and no other step or environment variable overrides it.
 
 ### test_agent_working_timeout
