@@ -124,6 +124,8 @@ no-mistakes axi run --intent "the user's goal" --skip test,lint
 no-mistakes axi run --intent "the user's goal" --yes
 no-mistakes axi run --intent "the user's goal" --base-branch epic/foo
 no-mistakes axi run --intent "the user's goal" --no-publish-intent
+no-mistakes axi run --intent "the user's goal" --closes 95 --closes owner/repo#12
+no-mistakes axi run --intent "the user's goal" --require-mcp review:cloudflare --require-mcp test:cloudflare
 ```
 
 | Flag            | Type     | Default | Description                                                                                          |
@@ -135,6 +137,8 @@ no-mistakes axi run --intent "the user's goal" --no-publish-intent
 | `--skip`        | `string` | (none)  | Comma-separated pipeline steps to skip                                                               |
 | `--base-branch` | `string` | (none)  | Integration branch for this run only; overrides [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) |
 | `--no-publish-intent` | `bool` | `false` | Keep the generated `## Intent` section out of the PR body for this run; tighten-only, see below |
+| `--closes` | `string`, repeatable | (none) | GitHub issue the PR fully resolves (`95` or `owner/repo#95`); see [Closing issues](#closing-issues) |
+| `--require-mcp` | `string[]` | (none) | Declare a required Codex MCP server for Review or Test, in `stage:server` form; repeatable |
 | `--model` | `string` | (none) | Pi provider/model ID for an immutable [per-run profile](/no-mistakes/reference/global-config/#per-run-pi-profiles) |
 | `--effort` | `string` | (none) | Pi reasoning effort for that profile; omitted fields inherit `agent_config.pi` |
 | `--wait`        | `duration` | `8m`    | Maximum time for active-run lookup and run driving before the caller must reattach |
@@ -192,6 +196,27 @@ Reattaching with a `--base-branch` that differs from the active run's stored tar
 Before starting a run that may omit the section (this flag set, the global `intent.publish_intent` default `false`, or a global config that cannot be read), `axi run` probes the running daemon for the capability and refuses to start anything when that daemon is too old to honor it (an older daemon would silently drop the field, never read the global default, and publish); restart the daemon with the current binary. Only a run that cannot omit (flag unset, global default `true`) may reuse an older daemon. `rerun` always probes, because it inherits omission from the selected prior run and only the daemon knows that selection.
 Under the flag the PR-drafting turns receive no intent text at all and draft from the diff and commit messages only; every other step prompt keeps the full intent.
 The same omit-to-reattach rule applies to `--model`/`--effort` against an active run's [pinned Pi profile](/no-mistakes/reference/global-config/#per-run-pi-profiles); a different selection cannot change that pin.
+
+### Closing issues
+
+`--closes` declares an issue the PR fully resolves, so merging the PR closes it through GitHub's native closing keywords. Repeat it for each issue. A value is a same-repository issue number (`--closes 95`) or a cross-repository reference (`--closes owner/repo#95`); anything else, including `#95`, is rejected before a run starts. References are deduplicated case-insensitively and rendered in a deterministic order, one `Closes` line each, in the PR body's `## Issues` section (see the [PR step](/no-mistakes/reference/pipeline-steps/#pr)).
+
+`--closes` is the only way to request closure. Without it, no-mistakes never adds or infers a closing reference from the intent, commit messages, branch name, or linked issues: a PR may be partial work, so use ordinary references in your own text for that. Text the pipeline writes into the PR body never carries a live closing keyword: a reference such as `Fixes #12` in the intent or a drafted narrative is published as ``Fixes `#12` `` in an inline code span, which GitHub ignores. PR titles and commit messages are not rewritten, so a squash merge can still close an issue named after a closing keyword there.
+
+The references are persisted on the run and survive daemon restarts, fix rounds, rebases, and that run's PR-body refreshes; `no-mistakes rerun` inherits them, and its own `--closes` adds to them. They can also be passed on a plain gate push as repeated `-o no-mistakes.closes=<ref>` push options; a gate push without them starts a run with none, and its PR-body refresh drops the `## Issues` section. Reattaching with `--closes` adds references to the active run until its PR body has been composed; after that the request is refused with an explicit error rather than reported as applied. Before starting a run with `--closes`, `axi run` refuses a running daemon too old to honor it, and rejects `--closes` combined with `--skip pr` as a usage error; a run whose PR step is skipped any other way fails at that step instead (see the [PR step](/no-mistakes/reference/pipeline-steps/#pr)).
+
+`--closes` is supported on GitHub only; on another forge the PR step fails rather than publish a PR that silently closes nothing. GitHub closes the issue only when the PR merges into the repository's default branch and the issue is eligible for keyword closure; a PR merged into another branch does not close it.
+### Codex MCP prerequisites
+
+Cloudflare MCP is an optional tool connection visible to Codex agents, such as for Cloudflare account and platform operations. No-mistakes does not use it as a test runner, and an ambient Cloudflare connection warning does not prove a Review or Test agent called a Cloudflare tool. Ordinary stages use a local configuration inventory to disable an existing named server for Codex invocations. An absent server is left absent. This inventory never probes or requires authorization. The supported configuration key is exactly `cloudflare`; case variants are distinct keys and are not matched or accepted as requirement aliases. Declare it only for a task that needs it, for example `--require-mcp test:cloudflare` or `--require-mcp review:cloudflare`.
+
+The declaration is pinned to the run and carried through the daemon launch path. Before any pipeline step executes, the shared executor checks every declared Review and Test requirement. The daemon asks its configured Codex binary for MCP runtime authorization status using the daemon's effective environment, `CODEX_HOME`, and supported Codex configuration overrides. Codex must expose thread runtime MCP status; unavailable or unsupported probe capabilities fail closed. Configuration selectors are preserved during the probe. When a profile is selected, the probe resolves its effective Cloudflare connection settings through the native Codex MCP CLI and passes them to app-server as TOML overrides; it still requires a connected runtime status from the ephemeral thread. Failure to resolve those settings leaves the prerequisite unauthorized. A foreground login in a different Codex home does not satisfy the probe. A configured server listing alone is not authorization.
+
+The client refuses to launch a declaration through a daemon without MCP-readiness support, before pushing or creating a run. The shared launch boundary also validates every effective adapter for the declared stages, including fallback, reviewer, fixer, and later-round choices, before cancelling an existing active run. Declared Cloudflare requirements are supported only by Codex. The declaration is immutable for that run. To reattach, omit `--require-mcp`; supplying a different dependency list is refused rather than silently changing the active run.
+
+When authorization is unavailable, the `gate` object contains `authorization_required` with `provider`, `server`, `stage`, `status`, `executor_context`, and `next_action`. `status` is one of `declared_not_authorized`, `authorization_required_during_probe`, or `authorization_required_during_tool_attempt`; a successful preflight records `authorized` in the step log, and an undeclared dependency records `disabled`. These fields contain no tokens, headers, prompts, or server response. The login command is safe to display; if the Codex command prints an OAuth URL, use that URL in the same human authorization flow, then run the retry command displayed by the gate, `no-mistakes axi respond --action fix --findings <id>`, using its actual authorization finding ID (`prelaunch-mcp-authorization-required` before pipeline execution, otherwise `mcp-authorization-required`), so the daemon re-probes its own context before resuming. A prelaunch gate belongs to the first executing step and identifies the stage that needs the dependency; retry starts that step normally once all prerequisites are authorized. Review and Test also recheck at stage entry to catch later authorization loss. A Review authorization retry prepares retained files through the normal protected-path and custody-aware commit checks before rebuilding the reviewable diff, so newly created source files must be covered by the rereview.
+
+`--yes` does not approve or skip an authorization gate. A driver should relay the structured gate to the human, who can run `next_action` in the daemon's Codex context or follow its OAuth instructions. The IPC run object exposes the same immutable declaration as `required_mcp`, and the structured finding carries the typed authorization handoff.
 Ordinary reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
 That refusal returns the complete structured state and its `continue_active_run` or `recover_custody` next action instead of a raw Git non-fast-forward.
@@ -200,8 +225,7 @@ Starting a fresh run also requires a runnable effective pipeline agent.
 If the configured native agent or ACP runner is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
-The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) are an exception to this automatic handling.
-So is a Test budget-cut gate that reports `test-agent-unvalidated-work`: approval is refused there, so `--yes` stops at it and leaves the choice between `--action fix` and `no-mistakes axi abort` to the operator (see [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout)).
+The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths), incomplete Review/Test invocation gates, unvalidated Test work, and required MCP authorization are exceptions to this automatic handling. `--yes` stops at these gates and leaves retry or cancellation to the operator; it cannot approve or skip unfinished validation or authorize an MCP server.
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
@@ -515,6 +539,7 @@ no-mistakes rerun
 no-mistakes rerun --intent "the revised user goal"
 no-mistakes rerun --model openai-codex/gpt-5.4 --effort high
 no-mistakes rerun --no-publish-intent
+no-mistakes rerun --closes 95
 ```
 
 `--model` and `--effort` opt this new run into a [pinned Pi profile](/no-mistakes/reference/global-config/#per-run-pi-profiles), with the same precedence and validation as `axi run`. Omitting both retains current global-config behavior; a prior run's model pin is not inherited.
@@ -551,6 +576,7 @@ use rerun to bypass a gate.
 | ---- | ---- | ------- | ----------- |
 | `--intent` | `string` | (none) | Explicit intent overriding inherited intent or fresh inference |
 | `--no-publish-intent` | `bool` | `false` | Keep the generated `## Intent` section out of the PR body for this rerun (adds to the inherited decision; tighten-only) |
+| `--closes` | `string`, repeatable | (none) | GitHub issue the PR fully resolves; adds to the [closing references](#closing-issues) inherited from the selected prior run |
 | `--model` | `string` | (none) | Pi provider/model ID for an immutable [per-run profile](/no-mistakes/reference/global-config/#per-run-pi-profiles) |
 | `--effort` | `string` | (none) | Pi reasoning effort for that profile; omitted fields inherit `agent_config.pi` |
 

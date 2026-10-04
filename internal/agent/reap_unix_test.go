@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -310,4 +311,41 @@ func waitForNativeAgentPipeHelperReady(path string, timeout time.Duration) bool 
 		time.Sleep(10 * time.Millisecond)
 	}
 	return false
+}
+
+func TestCodexAgent_MCPAuthorizationTerminatesLiveTurn(t *testing.T) {
+	for _, purpose := range []string{"review", "review-fix", "test-evidence", "test-fix"} {
+		for _, exits := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/exits=%v", purpose, exits), func(t *testing.T) {
+				dir := t.TempDir()
+				ending := "wait"
+				if exits {
+					ending = "exit 1"
+				}
+				bin := writeFakeCodex(t, dir, `#!/bin/sh
+sleep 120 &
+echo $! > child.pid
+printf '%s' retained > retained.txt
+printf '%s\n' '{"type":"item.completed","item":{"type":"mcp_tool_call","server":"cloudflare","error":{"code":"AuthRequired","message":"private-secret"}}}'
+`+ending+"\n", "")
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				start := time.Now()
+				_, err := (&codexAgent{bin: bin}).Run(ctx, RunOpts{CWD: dir, Purpose: purpose, RequiredMCPServers: []string{"cloudflare"}})
+				var auth *MCPAuthorizationError
+				if !errors.As(err, &auth) || auth.Server != "cloudflare" || strings.Contains(err.Error(), "private-secret") || time.Since(start) >= 3*time.Second {
+					t.Fatalf("authorization handoff delayed or lost: %v elapsed=%s", err, time.Since(start))
+				}
+				child := waitForPidFile(t, filepath.Join(dir, "child.pid"), time.Second)
+				if !pidGoneWithin(child, 3*time.Second) {
+					_ = syscall.Kill(child, syscall.SIGKILL)
+					t.Fatalf("authorization left child %d running", child)
+				}
+				retained, err := os.ReadFile(filepath.Join(dir, "retained.txt"))
+				if err != nil || string(retained) != "retained" {
+					t.Fatalf("interrupted file=%q err=%v", retained, err)
+				}
+			})
+		}
+	}
 }

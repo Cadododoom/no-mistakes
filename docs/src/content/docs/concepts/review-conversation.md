@@ -262,9 +262,9 @@ whose category is `review-question`, which means:
 - `runs.awaiting_agent_since` is stamped and `runs.parked_ms` accrues, exactly
   as documented in `AGENTS.md` under **Parked / Awaiting-Agent Signal**;
 - the TUI, the IPC event stream and `axi status` already surface the park;
-- `review_agent_timeout` (30 m) cannot count the wait, because there is no
+- [`review_agent_timeout`](/no-mistakes/reference/global-config/#review_agent_timeout) cannot count the wait, because there is no
   agent turn in flight: the turn ended before the park, and the finalize turn
-  is a fresh invocation with a fresh deadline from `reviewAgentContext`.
+  is a fresh invocation with its own budget from the shared agent-run path.
 
 The findings payload rides the IPC event stream, so the gate renders at most 50
 question rows. When more are open, one further notice reports the count and

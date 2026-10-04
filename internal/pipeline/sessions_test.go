@@ -35,6 +35,21 @@ func newFakeSessionAgent() *fakeSessionAgent {
 	return &fakeSessionAgent{supportsFlag: true, failResumes: map[string]error{}}
 }
 
+func TestRunSessions_MCPAuthorizationFailureDoesNotReplayTheTurn(t *testing.T) {
+	fake := newFakeSessionAgent()
+	rs := NewRunSessions(nil, "run", fake, true)
+	if _, err := rs.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	fake.failNext = &agent.MCPAuthorizationError{Server: "cloudflare"}
+	if _, err := rs.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{}, nil); !agent.IsMCPAuthorizationError(err) {
+		t.Fatalf("authorization failure = %v", err)
+	}
+	if len(fake.calls) != 2 || fake.calls[1].fallback {
+		t.Fatalf("authorization failure replayed a tool turn: %+v", fake.calls)
+	}
+}
+
 func (f *fakeSessionAgent) Name() string {
 	if f.name != "" {
 		return f.name

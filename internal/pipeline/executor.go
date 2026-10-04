@@ -46,13 +46,15 @@ type approvalResponse struct {
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
 type Executor struct {
-	db     *db.DB
-	paths  *paths.Paths
-	config *config.Config
-	forge  *forgecontext.Context
-	agent  agent.Agent
-	steps  []Step
-	skips  map[types.StepName]bool
+	db        *db.DB
+	paths     *paths.Paths
+	config    *config.Config
+	forge     *forgecontext.Context
+	mcpProber MCPReadinessProber
+	mcpReady  bool
+	agent     agent.Agent
+	steps     []Step
+	skips     map[types.StepName]bool
 
 	onEvent EventFunc
 
@@ -67,6 +69,7 @@ type Executor struct {
 	waiting                bool                  // true when blocked on approval
 	waitingStep            types.StepName        // which step is currently awaiting approval
 	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	waitingSkipRefusal     string                // non-empty: why Skip is rejected at the waiting gate
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -86,6 +89,14 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 // subprocess in this run. A nil context preserves ambient behavior.
 func (e *Executor) SetForgeContext(ctx *forgecontext.Context) {
 	e.forge = ctx
+}
+
+// SetMCPReadinessProber installs the daemon-context Codex probe used only by
+// explicitly declared stage dependencies.
+func (e *Executor) SetMCPReadinessProber(prober MCPReadinessProber) {
+	e.mu.Lock()
+	e.mcpProber = prober
+	e.mu.Unlock()
 }
 
 // SetSkippedSteps configures steps that should be marked skipped without running.
@@ -205,6 +216,11 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return errors.New(refusal)
 	}
+	if action == types.ActionSkip && e.waitingSkipRefusal != "" {
+		refusal := e.waitingSkipRefusal
+		e.mu.Unlock()
+		return errors.New(refusal)
+	}
 	e.waiting = false
 	e.mu.Unlock()
 
@@ -244,6 +260,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
+	e.mcpReady = false
 
 	// Create step result records in DB
 	stepRecords := make(map[types.StepName]*db.StepResult)
@@ -266,6 +283,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 
 		sr := stepRecords[step.Name()]
 		if e.skips[step.Name()] {
+			if err := e.refuseSkippedPRWithClosingIssues(run, repo, step.Name(), sr.ID); err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
 				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
 			}
@@ -288,6 +308,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 			// Mark all subsequent steps as skipped
 			for _, remaining := range e.steps[i+1:] {
 				rsr := stepRecords[remaining.Name()]
+				if err := e.refuseSkippedPRWithClosingIssues(run, repo, remaining.Name(), rsr.ID); err != nil {
+					return e.failRun(run, repo, err, ctx)
+				}
 				if dbErr := e.db.CompleteStepWithStatus(rsr.ID, types.StepStatusSkipped, 0, 0, ""); dbErr != nil {
 					slog.Warn("failed to finalize skipped step", "step", remaining.Name(), "error", dbErr)
 				}
@@ -437,6 +460,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
+	e.mcpReady = !hasFindingID(gate.findings, prelaunchMCPAuthorizationID)
 
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
@@ -510,6 +534,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
+	e.waitingSkipRefusal = skipRefusal(gate.step.Name(), gate.findings)
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -523,6 +548,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	)
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
+	if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+		return ErrDaemonShutdown
+	}
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
@@ -585,7 +613,11 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			executionMS:     duration,
 			currentRoundID:  gate.lastRoundID,
 		}
-		if response.action == types.ActionAnswer {
+		if hasFindingID(gate.findings, prelaunchMCPAuthorizationID) {
+			if dbErr := e.db.UpdateStepStatus(gate.stepResult.ID, types.StepStatusRunning); dbErr != nil {
+				return e.failRun(run, repo, dbErr, ctx)
+			}
+		} else if response.action == types.ActionAnswer {
 			state.answering = true
 			// Carry the parked gate's outstanding set into the finalize round.
 			// The live path keeps it in locals across `continue rounds`, so an
@@ -807,6 +839,9 @@ func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int)
 		if index >= len(results) || results[index].StepName != e.steps[index].Name() || results[index].Status != types.StepStatusPending {
 			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index))
 		}
+		if err := e.refuseSkippedPRWithClosingIssues(run, repo, e.steps[index].Name(), results[index].ID); err != nil {
+			return e.failRun(run, repo, err)
+		}
 		if err := e.db.CompleteStepWithStatus(results[index].ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", e.steps[index].Name(), err))
 		}
@@ -816,6 +851,28 @@ func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int)
 		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err))
 	}
 	return nil
+}
+
+// refuseSkippedPRWithClosingIssues fails a PR step the executor would mark
+// skipped without running it while the run carries --closes references:
+// nothing would publish them. The claim makes a concurrent reattach fail
+// closed too.
+func (e *Executor) refuseSkippedPRWithClosingIssues(run *db.Run, repo *db.Repo, name types.StepName, stepResultID string) error {
+	if name != types.StepPR {
+		return nil
+	}
+	refs, err := e.db.ClaimClosingIssueRefsForPRBody(run.ID)
+	if err == nil && len(refs) > 0 {
+		err = fmt.Errorf("render closing issues: --closes requires publishing a pull request, but the pr step is skipped; close the issue manually, or rerun without --closes when the changes are already in the base branch")
+	}
+	if err == nil {
+		return nil
+	}
+	if dbErr := e.db.FailStep(stepResultID, err.Error(), 0); dbErr != nil {
+		slog.Warn("failed to mark step as failed in db", "step", name, "error", dbErr)
+	}
+	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, name, string(types.StepStatusFailed), "", err.Error(), nil)
+	return fmt.Errorf("step %s failed: %s", name, err)
 }
 
 func recoveredStepDuration(step *db.StepResult) int64 {
@@ -998,7 +1055,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	if stepAgent != nil {
 		// Innermost: default-by-construction invocation deadline so a step
 		// that calls Agent.Run directly cannot hang the run.
-		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(e.config)}
+		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(e.config), working: AgentWorkingTimeout(e.config)}
 		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
 		stepAgent = &lifecycleAgent{inner: stepAgent, onLifecycle: onAgentLifecycle}
 		stepAgent = &perfRecordingAgent{
@@ -1043,6 +1100,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		WorkDir:           workDir,
 		GateDir:           e.paths.RepoDir(repo.ID),
 		Agent:             stepAgent,
+		StepName:          stepName,
+		MCPProber:         e.mcpProber,
 		Config:            e.config,
 		ForgeContext:      e.forge,
 		DB:                e.db,
@@ -1110,7 +1169,88 @@ rounds:
 	for {
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
-		outcome, err := step.Execute(sctx)
+		var outcome *StepOutcome
+		var err error
+		if !e.mcpReady {
+			outcome, err = e.prelaunchMCPReadiness(sctx)
+			if err == nil && outcome == nil {
+				e.mcpReady = true
+			}
+		}
+		if err == nil && outcome == nil {
+			outcome, err = step.Execute(sctx)
+		}
+		if ctx.Err() != nil {
+			if recorder, ok := step.(InterruptedWorkRecorder); ok {
+				inspectCtx, cancelInspect := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				inspection := *sctx
+				inspection.Ctx = inspectCtx
+				retained, inspectErr := recorder.InterruptedWorkFindings(&inspection)
+				cancelInspect()
+				if inspectErr == nil && retained != "" {
+					findings := mergeFindingsJSON(sctx.PreviousFindings, sctx.DeferredFindings)
+					stored, readErr := e.db.GetStepResult(sr.ID)
+					if readErr != nil {
+						inspectErr = readErr
+					} else {
+						if stored.FindingsJSON != nil {
+							findings = mergeFindingsJSON(findings, *stored.FindingsJSON)
+						}
+						if outcome != nil {
+							findings = mergeFindingsJSON(findings, outcome.Findings)
+						}
+						inspectErr = e.db.SetStepFindings(sr.ID, mergeFindingsJSON(retained, findings))
+					}
+				}
+				if inspectErr != nil {
+					return false, "", fmt.Errorf("preserve interrupted %s work: %w", stepName, inspectErr)
+				}
+			}
+			if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+				if stepName != types.StepReview && stepName != types.StepTest {
+					return false, "", ErrDaemonShutdown
+				}
+				// An executing turn has no durable gate yet. Use the ordinary
+				// round/park path below so startup can recover it without certifying
+				// interrupted work or losing the previous Test verdict and exit code.
+				stored, readErr := e.db.GetStepResult(sr.ID)
+				if readErr != nil {
+					return false, "", readErr
+				}
+				findings := ""
+				if stored.FindingsJSON != nil {
+					findings = *stored.FindingsJSON
+				}
+				findings = mergeFindingsJSON(findings, mergeFindingsJSON(sctx.PreviousFindings, sctx.DeferredFindings))
+				exitCode := finalExitCode
+				if stored.ExitCode != nil {
+					exitCode = *stored.ExitCode
+				}
+				if outcome != nil {
+					findings = mergeFindingsJSON(findings, outcome.Findings)
+					exitCode = outcome.ExitCode
+				}
+				// Reuse the step's invocation-control identity: all gate consumers
+				// must refuse approve/skip and retry validation without repairing
+				// this runtime condition as though it were a source defect.
+				incompleteID := types.FindingIDReviewAgentIncomplete
+				if stepName == types.StepTest {
+					incompleteID = types.FindingIDTestAgentIncomplete
+				}
+				interrupted, _ := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{{
+					ID: incompleteID, Severity: types.FindingSeverityWarning,
+					Action:      types.ActionAskUser,
+					Description: "Daemon shutdown interrupted this validation turn. Retry with fix to validate retained work, or abort.",
+				}}})
+				outcome = &StepOutcome{NeedsApproval: true, Findings: mergeFindingsJSON(findings, interrupted), ExitCode: exitCode}
+				if carryFindings {
+					outstandingFindings = mergeFindingsJSON(outcome.Findings, outstandingFindings)
+				}
+				err = nil
+			} else {
+				err = context.Cause(ctx)
+			}
+		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -1166,8 +1306,8 @@ rounds:
 			// file instead poisons that path in reportedFiles. Either way an
 			// answered-and-verified finding would stay outstanding for a reason
 			// that has nothing to do with it.
-			verificationFindings := dropReviewQuestionFindingsJSON(roundFindings)
-			outstandingFindings = dropReviewQuestionFindingsJSON(outstandingFindings)
+			verificationFindings := dropReviewControlFindingsJSON(roundFindings)
+			outstandingFindings = dropReviewControlFindingsJSON(outstandingFindings)
 			// An answer round retracts by naming ids, never by silence - and
 			// ONLY an answer round. A fix round is held to the coverage rule,
 			// so a retraction it claimed would clear a selected finding no
@@ -1310,6 +1450,7 @@ rounds:
 			e.waiting = true
 			e.waitingStep = stepName
 			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
+			e.waitingSkipRefusal = skipRefusal(stepName, effectiveFindings)
 			e.mu.Unlock()
 
 			// Parking starts before the gate becomes observable. This includes the
@@ -1325,12 +1466,17 @@ rounds:
 				e.mu.Lock()
 				e.waiting = false
 				e.waitingStep = ""
+				e.waitingApprovalRefusal = ""
+				e.waitingSkipRefusal = ""
 				e.mu.Unlock()
 				return false, "", fmt.Errorf("persist %s approval gate: %w", stepName, dbErr)
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
+			if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+				return false, "", ErrDaemonShutdown
+			}
 			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 			}
@@ -1388,6 +1534,14 @@ rounds:
 				return false, "", fmt.Errorf("step %s: aborted by user", stepName)
 
 			case types.ActionFix:
+				if hasFindingID(effectiveFindings, prelaunchMCPAuthorizationID) {
+					phaseStart = time.Now()
+					if err := markRunning(); err != nil {
+						return false, "", err
+					}
+					nextTrigger = "initial"
+					continue rounds
+				}
 				telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(effectiveFindings, response.findingIDs), 0))
 				// Fix - mark step as fixing, resume execution timer, re-execute.
 				phaseStart = time.Now()
@@ -1727,6 +1881,8 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		e.mu.Lock()
 		e.waiting = false
 		e.waitingStep = ""
+		e.waitingApprovalRefusal = ""
+		e.waitingSkipRefusal = ""
 		e.mu.Unlock()
 		// Drain any stale response that arrived after context cancellation or
 		// raced with an external reconciliation.
@@ -1807,6 +1963,8 @@ func (e *Executor) claimGateReconciliation() bool {
 	}
 	e.waiting = false
 	e.waitingStep = ""
+	e.waitingApprovalRefusal = ""
+	e.waitingSkipRefusal = ""
 	return true
 }
 
@@ -1819,7 +1977,7 @@ func (e *Executor) resumeApprovalGate(ctx context.Context, step Step, sctx *Step
 	if !ok {
 		return "", false, nil
 	}
-	if HasProtectedPathRefusal(findingsJSON) {
+	if HasProtectedPathRefusal(findingsJSON) || hasFindingID(findingsJSON, prelaunchMCPAuthorizationID) {
 		return "", false, nil
 	}
 	timeout := e.gateReconcileTimeout
@@ -1838,7 +1996,7 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	if !ok {
 		return false, nil
 	}
-	if HasProtectedPathRefusal(findingsJSON) {
+	if HasProtectedPathRefusal(findingsJSON) || hasFindingID(findingsJSON, prelaunchMCPAuthorizationID) {
 		return false, nil
 	}
 	timeout := e.gateReconcileTimeout
@@ -1852,10 +2010,22 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	return reconciler.ReconcileApprovalGate(&copyCtx)
 }
 
+// ErrDaemonShutdown suspends local execution without resolving a durable gate.
+// Startup recovery decides whether an interrupted executing stage can resume.
+var ErrDaemonShutdown = errors.New("daemon shutting down")
+
 // failRun marks a run as failed and returns the error.
 // It accepts an optional context; if the context was cancelled with a cause,
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
+	if errors.Is(err, ErrDaemonShutdown) {
+		return ErrDaemonShutdown
+	}
+	for _, ctx := range ctxs {
+		if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+			return ErrDaemonShutdown
+		}
+	}
 	errMsg := err.Error()
 	for _, ctx := range ctxs {
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
@@ -1919,6 +2089,19 @@ func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	for _, name := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD"} {
+		operationPath, err := git.Run(ctx, e.workDir, "rev-parse", "--git-path", name)
+		if err != nil {
+			return "", false
+		}
+		operationPath = strings.TrimSpace(operationPath)
+		if !filepath.IsAbs(operationPath) {
+			operationPath = filepath.Join(e.workDir, operationPath)
+		}
+		if _, err := os.Stat(operationPath); !os.IsNotExist(err) {
+			return "", false
+		}
+	}
 	observed, err := git.HeadSHA(ctx, e.workDir)
 	if err != nil {
 		slog.Warn("failed to resolve worktree head before terminalization", "run", run.ID, "error", err)
@@ -2207,7 +2390,7 @@ func answerRoundCarriedFindings(answering bool, outstanding string) string {
 	if !answering {
 		return ""
 	}
-	return dropReviewQuestionFindingsJSON(outstanding)
+	return dropReviewControlFindingsJSON(outstanding)
 }
 
 // ReviewConversationAnswerDir is where an answer for this run may be appended,
@@ -2239,4 +2422,12 @@ func (e *Executor) ReviewConversationAnswerDir(runID string) string {
 		return ""
 	}
 	return dir
+}
+
+func (a *gateStepBoundaryAgent) SupportsMCP(server, purpose string) bool {
+	return agent.SupportsMCP(a.inner, server, purpose)
+}
+
+func (a *lifecycleAgent) SupportsMCP(server, purpose string) bool {
+	return agent.SupportsMCP(a.inner, server, purpose)
 }

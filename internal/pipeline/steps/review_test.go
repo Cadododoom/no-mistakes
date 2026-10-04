@@ -15,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -226,7 +227,7 @@ func TestReviewStep_PartialReviewedPathsDoesNotGrantApproval(t *testing.T) {
 	}
 }
 
-func TestReviewStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
+func TestReviewStep_HangingAgentParksForRetryAfterTimeout(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "hanging-review-agent",
@@ -238,44 +239,29 @@ func TestReviewStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.ReviewAgentTimeout = 20 * time.Millisecond
 
-	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
-	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil {
-		t.Fatal("expected hanging review agent to fail the run")
-	}
+	startReviewExecutorUntilPark(t, sctx, dir)
 
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
 		t.Fatalf("get run: %v", err)
 	}
-	if run.Status != types.RunFailed {
-		t.Fatalf("run status = %s, want %s", run.Status, types.RunFailed)
+	if run.Status != types.RunRunning || run.AwaitingAgentSince == nil {
+		t.Fatalf("run status = %s, awaiting_agent_since = %v; want an active parked run", run.Status, run.AwaitingAgentSince)
 	}
-	var got string
-	if run.Error != nil {
-		got = *run.Error
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil || len(steps) != 1 || steps[0].Status != types.StepStatusAwaitingApproval || steps[0].FindingsJSON == nil {
+		t.Fatalf("review steps = %+v, err = %v; want a recoverable approval gate", steps, err)
 	}
-	// The diagnostic must name the budget that expired AND report what was
-	// actually observed. An agent that never emitted anything is a different
-	// operator problem from one that streamed until the deadline, and the run
-	// error is the only place that distinction survives.
-	if !strings.Contains(got, "reached its absolute wall-clock limit after 20ms") {
-		t.Fatalf("run error = %q, want the expired review wall-clock limit named", got)
+	findings, err := types.ParseFindingsJSON(*steps[0].FindingsJSON)
+	if err != nil || len(findings.Items) == 0 {
+		t.Fatalf("review findings = %+v, err = %v", findings, err)
 	}
-	if !strings.Contains(got, "produced no output at all") {
-		t.Fatalf("run error = %q, want the measured silence of a never-emitting agent", got)
-	}
-	if strings.Contains(got, "silent for 20ms") {
-		t.Fatalf("run error = %q, must not restate the budget as if it were a measurement", got)
+	if !strings.Contains(findings.Items[0].Description, "agent produced no output at all") {
+		t.Fatalf("finding = %q, want measured silence", findings.Items[0].Description)
 	}
 }
 
-// TestReviewStep_WallClockTimeoutPreservesTheAgentReport pins the other half
-// of the diagnostic contract at the review invocation limit: whatever the adapter
-// managed to report reaches the operator. For a native agent that error is the
-// killed subprocess's exit status and stderr - the only account of what the
-// process was actually doing - and it is what makes a silent 30-minute review
-// timeout diagnosable instead of a dead end.
-func TestReviewStep_WallClockTimeoutPreservesTheAgentReport(t *testing.T) {
+func TestReviewStep_WallClockTimeoutParksWithSafeActivityEvidence(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "reporting-review-agent",
@@ -287,45 +273,74 @@ func TestReviewStep_WallClockTimeoutPreservesTheAgentReport(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.ReviewAgentTimeout = 20 * time.Millisecond
 
-	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
-	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil {
-		t.Fatal("expected the review invocation limit to fail the run")
-	}
+	startReviewExecutorUntilPark(t, sctx, dir)
 
-	run, err := sctx.DB.GetRun(sctx.Run.ID)
-	if err != nil {
-		t.Fatalf("get run: %v", err)
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil || len(steps) != 1 || steps[0].FindingsJSON == nil {
+		t.Fatalf("review steps = %+v, err = %v", steps, err)
 	}
-	var got string
-	if run.Error != nil {
-		got = *run.Error
+	findings, err := types.ParseFindingsJSON(*steps[0].FindingsJSON)
+	if err != nil || len(findings.Items) == 0 {
+		t.Fatalf("review findings = %+v, err = %v", findings, err)
 	}
-	if !strings.Contains(got, "provider authentication required") {
-		t.Fatalf("run error = %q, want the agent's own report preserved", got)
+	if !strings.Contains(findings.Items[0].Description, "agent produced no output at all") {
+		t.Fatalf("finding = %q, want measured activity evidence", findings.Items[0].Description)
 	}
-	if !strings.Contains(got, "reached its absolute wall-clock limit after 20ms") {
-		t.Fatalf("run error = %q, want the expired review wall-clock limit named", got)
+	if strings.Contains(findings.Items[0].Description, "provider authentication required") {
+		t.Fatalf("finding = %q, must not contain free-form adapter output", findings.Items[0].Description)
 	}
 }
 
-// TestReviewStep_EachAgentInvocationGetsItsOwnBudget pins the
-// review_agent_timeout ownership contract across two complete auto-fix cycles.
-// Each successful fixer consumes 29 of its 30 fake minutes; both independent
-// rereviewers must still start with a fresh full 30-minute allowance.
+func TestReviewStep_ProcessExitParksAndPreservesPartialWork(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	partial := filepath.Join(dir, "review-partial.txt")
+	ag := &mockAgent{
+		name: "exiting-review-agent",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(partial, []byte("unfinished review work"), 0o644); err != nil {
+				return nil, err
+			}
+			return nil, simulatedAgentProcessExit(t, 7)
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	startReviewExecutorUntilPark(t, sctx, dir)
+	if got, err := os.ReadFile(partial); err != nil || string(got) != "unfinished review work" {
+		t.Fatalf("partial review work = %q, err = %v", got, err)
+	}
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil || len(steps) != 1 || steps[0].FindingsJSON == nil {
+		t.Fatalf("steps = %+v, err = %v", steps, err)
+	}
+	findings, err := types.ParseFindingsJSON(*steps[0].FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse findings: %v", err)
+	}
+	ids := make(map[string]bool, len(findings.Items))
+	for _, finding := range findings.Items {
+		ids[finding.ID] = true
+	}
+	if !ids[types.FindingIDReviewAgentIncomplete] || !ids[types.FindingIDReviewAgentUnvalidatedWork] {
+		t.Fatalf("findings = %+v, want incomplete invocation and preserved work", findings.Items)
+	}
+	if !strings.Contains(findings.Items[0].Description, "agent process exited with status 7") {
+		t.Fatalf("finding = %q, want process exit evidence", findings.Items[0].Description)
+	}
+}
+
+// TestReviewStep_EachAgentInvocationGetsItsOwnBudget proves a healthy turn can
+// receive a budget beyond the former 30-minute wall while every later invocation gets a fresh
+// eight-hour recovery ceiling.
 func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
 	const (
-		timeout    = 30 * time.Minute
-		fixerWork  = 29 * time.Minute
-		reviewWork = time.Minute
+		timeout = 8 * time.Hour
 	)
-	fakeNow := time.Now().Add(24 * time.Hour)
 	type call struct {
-		fixTurn  bool
-		deadline time.Time
-		started  time.Time
+		fixTurn   bool
+		remaining time.Duration
 	}
 	var calls []call
 
@@ -338,12 +353,10 @@ func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 				t.Errorf("agent call %d ran with no deadline", len(calls)+1)
 			}
 			isFix := strings.Contains(opts.Prompt, "Investigate previous review findings")
-			calls = append(calls, call{fixTurn: isFix, deadline: dl, started: fakeNow})
+			calls = append(calls, call{fixTurn: isFix, remaining: time.Until(dl)})
 			if isFix {
-				fakeNow = fakeNow.Add(fixerWork)
 				return &agent.Result{Output: json.RawMessage(`{"summary":"fixed it"}`)}, nil
 			}
-			fakeNow = fakeNow.Add(reviewWork)
 			// Initial review and the first rereview each request another fix;
 			// the second independent rereview certifies the result.
 			if len(calls) == 1 || len(calls) == 3 {
@@ -362,8 +375,7 @@ func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 	sctx.Config.ReviewAgentTimeout = timeout
 	sctx.Config.AutoFix.Review = 2
 
-	step := &ReviewStep{now: func() time.Time { return fakeNow }}
-	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{step}, nil)
+	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
 	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -377,20 +389,10 @@ func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 		if calls[i].fixTurn != wantFix[i] {
 			t.Fatalf("turn order = %+v, want review, fix, rereview, fix, rereview", calls)
 		}
-		remaining := calls[i].deadline.Sub(calls[i].started)
-		if remaining != timeout {
-			t.Errorf("call %d started with %v, want exactly %v", i+1, remaining, timeout)
-		}
-	}
-	if extension := calls[2].deadline.Sub(calls[1].deadline); extension != fixerWork {
-		t.Errorf("long fixer extended rereviewer deadline by %v, want %v; fixer consumed rereviewer budget", extension, fixerWork)
-	}
-	if extension := calls[4].deadline.Sub(calls[3].deadline); extension != fixerWork {
-		t.Errorf("second long fixer extended rereviewer deadline by %v, want %v; fixer consumed rereviewer budget", extension, fixerWork)
-	}
-	for i := 1; i < len(calls); i++ {
-		if !calls[i].deadline.After(calls[i-1].deadline) {
-			t.Errorf("call %d deadline %v did not refresh after call %d deadline %v", i+1, calls[i].deadline, i, calls[i-1].deadline)
+		// Visible deadline is the silent budget when no still-working cap is
+		// set. Leftover time from a previous turn would be far smaller.
+		if calls[i].remaining > timeout+time.Second || calls[i].remaining < timeout-time.Minute {
+			t.Errorf("call %d started with %v remaining, want a fresh silent budget around %v", i+1, calls[i].remaining, timeout)
 		}
 	}
 }
@@ -399,11 +401,14 @@ func TestReviewFix_PostAgentCommitUsesStepParentContext(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
-	fakeNow := time.Now().Add(time.Hour)
 	var invocationDeadline time.Time
+	prepared := false
 	ag := &mockAgent{
 		name: "near-deadline-fixer",
 		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if !prepared {
+				t.Fatal("fixer deadline started before synchronous preparation")
+			}
 			deadline, ok := ctx.Deadline()
 			if !ok {
 				t.Fatal("fixer context has no deadline")
@@ -412,14 +417,12 @@ func TestReviewFix_PostAgentCommitUsesStepParentContext(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			fakeNow = deadline.Add(-time.Second)
 			return &agent.Result{Output: json.RawMessage(`{"summary":"fix timeout ownership"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Fixing = true
 	sctx.Config.ReviewAgentTimeout = 30 * time.Minute
-	prepared := false
 	originalLog := sctx.Log
 	sctx.Log = func(message string) {
 		if message == "preparing fixer" {
@@ -427,21 +430,12 @@ func TestReviewFix_PostAgentCommitUsesStepParentContext(t *testing.T) {
 		}
 		originalLog(message)
 	}
-	step := &ReviewStep{now: func() time.Time {
-		if !prepared {
-			t.Fatal("fixer deadline started before synchronous preparation")
-		}
-		return fakeNow
-	}}
 
-	summary, err := step.executeReviewFixWithTimeout(sctx, types.StepReview, fixExecutionOptions{
+	summary, err := (&ReviewStep{}).executeReviewFixWithTimeout(sctx, types.StepReview, fixExecutionOptions{
 		LogMessage:      "preparing fixer",
 		ErrorPrefix:     "agent fix failed",
 		FallbackSummary: "fix review findings",
 		AfterAgentRun: func(*agent.Result) error {
-			if remaining := invocationDeadline.Sub(fakeNow); remaining != time.Second {
-				t.Fatalf("post-agent work began with %v of the invocation budget, want 1s", remaining)
-			}
 			if _, ok := sctx.Ctx.Deadline(); ok {
 				t.Fatal("post-agent work inherited the invocation deadline")
 			}
@@ -478,11 +472,46 @@ func TestReviewStep_LateCompletionAfterInvocationDeadlineIsRejected(t *testing.T
 	sctx.Config.ReviewAgentTimeout = 20 * time.Millisecond
 
 	outcome, err := (&ReviewStep{}).Execute(sctx)
-	if err == nil || !errors.Is(err, errReviewAgentTimeout) {
-		t.Fatalf("error = %v, want expired review invocation", err)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
 	}
-	if outcome != nil {
-		t.Fatalf("late review outcome = %+v, want nil", outcome)
+	if outcome == nil || !outcome.NeedsApproval || !strings.Contains(outcome.Findings, types.FindingIDReviewAgentIncomplete) {
+		t.Fatalf("late review outcome = %+v, want an incomplete invocation gate", outcome)
+	}
+}
+
+func TestReviewStep_StreamingPastStallBudgetCompletes(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	const stall = 80 * time.Millisecond
+	done := time.NewTimer(stall + stall/2)
+	defer done.Stop()
+	ag := &mockAgent{
+		name: "slow-reviewer",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			tick := time.NewTicker(5 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-done.C:
+					return &agent.Result{Output: json.RawMessage(`{"findings":[],"reviewed_paths":["feature.txt"],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}, nil
+				case <-tick.C:
+					opts.OnChunk("reviewing\n")
+				}
+			}
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.ReviewAgentTimeout = stall
+	sctx.Config.ReviewAgentWorkingTimeout = 4 * stall
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("working review cut at the stall budget: %v", err)
+	}
+	if outcome == nil {
+		t.Fatal("expected a completed review outcome")
 	}
 }
 
@@ -506,10 +535,7 @@ func TestReviewStep_ProgressWithoutTerminalCompletionCannotPublish(t *testing.T)
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.ReviewAgentTimeout = 40 * time.Millisecond
 
-	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
-	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil {
-		t.Fatal("expected progress-only review to hit its absolute limit")
-	}
+	startReviewExecutorUntilPark(t, sctx, dir)
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -517,14 +543,8 @@ func TestReviewStep_ProgressWithoutTerminalCompletionCannotPublish(t *testing.T)
 	if run.ReviewApprovedHeadSHA != nil {
 		t.Fatalf("progress-only review gained approval authority: %#v", run.ReviewApprovedHeadSHA)
 	}
-	if run.Error == nil {
-		t.Fatal("durable timeout error is nil")
-	}
-	if strings.Contains(*run.Error, "produced no output at all") || strings.Contains(*run.Error, "silent") {
-		t.Fatalf("actively streaming review was mislabelled silent: %q", *run.Error)
-	}
-	if !strings.Contains(*run.Error, "absolute wall-clock limit") || !strings.Contains(*run.Error, "last produced output") {
-		t.Fatalf("timeout diagnosis did not separate the absolute limit from measured activity: %q", *run.Error)
+	if run.Error != nil {
+		t.Fatalf("run error = %q, want the run parked with recoverable findings", *run.Error)
 	}
 	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 	if err != nil {
@@ -533,15 +553,27 @@ func TestReviewStep_ProgressWithoutTerminalCompletionCannotPublish(t *testing.T)
 	if len(steps) != 1 {
 		t.Fatalf("step results = %d, want 1", len(steps))
 	}
-	if steps[0].FindingsJSON != nil {
-		t.Fatalf("progress JSON was published as findings: %q", *steps[0].FindingsJSON)
+	if steps[0].FindingsJSON == nil {
+		t.Fatal("incomplete review did not persist its recovery gate")
+	}
+	findings, err := types.ParseFindingsJSON(*steps[0].FindingsJSON)
+	if err != nil || len(findings.Items) == 0 {
+		t.Fatalf("findings = %+v, err = %v", findings, err)
+	}
+	if strings.Contains(findings.Items[0].Description, "agent produced no output at all") || strings.Contains(findings.Items[0].Description, "silent") {
+		t.Fatalf("actively streaming review was mislabelled silent: %q", findings.Items[0].Description)
+	}
+	if !strings.Contains(findings.Items[0].Description, "agent last produced output") {
+		t.Fatalf("finding = %q, want measured recent activity", findings.Items[0].Description)
 	}
 	rounds, err := sctx.DB.GetRoundsByStep(steps[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rounds) != 0 {
-		t.Fatalf("progress-only review published %d completed round(s)", len(rounds))
+	for _, round := range rounds {
+		if round.FindingsJSON == nil || !strings.Contains(*round.FindingsJSON, types.FindingIDReviewAgentIncomplete) {
+			t.Fatalf("progress-only review recorded a certifying round: %+v", round)
+		}
 	}
 }
 
@@ -2144,5 +2176,38 @@ func TestSupersededRoundsDoNotClaimTheCommitsAreTheAuthors(t *testing.T) {
 		if strings.Contains(prompt, claim) {
 			t.Fatalf("the superseded-rounds block claims %q, but the previous run's fix-round commits are in this run's scope:\n%s", claim, prompt)
 		}
+	}
+}
+
+func startReviewExecutorUntilPark(t *testing.T, sctx *pipeline.StepContext, dir string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	parked := make(chan struct{}, 1)
+	executor := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, sctx.Agent, []pipeline.Step{&ReviewStep{}}, func(event ipc.Event) {
+		if event.Type == ipc.EventStepCompleted && event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
+			select {
+			case parked <- struct{}{}:
+			default:
+			}
+		}
+	})
+	done := make(chan error, 1)
+	go func() { done <- executor.Execute(ctx, sctx.Run, sctx.Repo, dir) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("review executor did not stop after test cancellation")
+		}
+	})
+	select {
+	case <-parked:
+	case err := <-done:
+		cancel()
+		done <- err
+		t.Fatalf("review ended without parking: %v", err)
+	case <-ctx.Done():
+		t.Fatal("review did not park within the test deadline")
 	}
 }

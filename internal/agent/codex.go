@@ -91,6 +91,11 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		resumeID = opts.Session.ID
 	}
 	args := a.buildArgs(schemaPath, resumeID)
+	mcpArgs, err := a.mcpStageArgs(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, mcpArgs...)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Stdin = strings.NewReader(opts.Prompt)
@@ -129,7 +134,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		}
 		return res
 	}
-	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, &usage, &lastMessage, &codexErr, &threadID, metrics); err != nil {
+	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, &usage, &lastMessage, &codexErr, &threadID, metrics, opts.RequiredMCPServers); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("codex parse events: %w", err)
@@ -172,6 +177,45 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	}
 	emitAgentExited(opts, "codex", pid, err)
 	return res, err
+}
+
+func (a *codexAgent) mcpStageArgs(ctx context.Context, opts RunOpts) ([]string, error) {
+	if !opts.ManageMCPAvailability {
+		return nil, nil
+	}
+	for _, server := range opts.RequiredMCPServers {
+		if server == "cloudflare" {
+			return nil, nil
+		}
+	}
+	// A dotted override creates an invalid transport when the server is absent.
+	// Inventory is local configuration only, never proof of authorization.
+	probeCtx, cancel := context.WithTimeout(ctx, codexMCPProbeTimeout)
+	defer cancel()
+	args := append(codexMCPConfigArgs(a.extraArgs), "mcp", "list", "--json")
+	cmd := exec.CommandContext(probeCtx, a.bin, args...)
+	cmd.Dir = opts.CWD
+	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
+	shellenv.ConfigureShellCommand(cmd)
+	output, err := shellenv.OutputShellCommand(cmd)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("cannot inspect Codex MCP configuration before agent launch")
+	}
+	var servers []struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(output, &servers) != nil {
+		return nil, fmt.Errorf("Codex MCP configuration inventory was unreadable; agent was not launched")
+	}
+	for _, server := range servers {
+		if server.Name == "cloudflare" {
+			return []string{"-c", "mcp_servers.cloudflare.enabled=false"}, nil
+		}
+	}
+	return nil, nil
 }
 
 func (a *codexAgent) Close() error { return nil }
@@ -319,10 +363,13 @@ type codexEvent struct {
 }
 
 type codexItem struct {
-	ID      string `json:"id"`
-	Type    string `json:"type"`
-	Text    string `json:"text"`
-	Command string `json:"command"`
+	ID      string          `json:"id"`
+	Type    string          `json:"type"`
+	Text    string          `json:"text"`
+	Command string          `json:"command"`
+	Server  string          `json:"server"`
+	Status  string          `json:"status"`
+	Error   json.RawMessage `json:"error,omitempty"`
 }
 
 type codexUsage struct {
@@ -339,7 +386,7 @@ type codexUsage struct {
 // evidence (round-trips, tool calls + categories, subprocess wait time). It is
 // clocked by time.Now as events arrive, so a tool item's started->completed gap
 // is its real subprocess wall time.
-func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, lastMessage *string, codexErr *string, threadID *string, metrics *codexMetricsAccumulator) error {
+func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, lastMessage *string, codexErr *string, threadID *string, metrics *codexMetricsAccumulator, requiredMCPServers []string) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024*1024)
 
@@ -376,6 +423,9 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 
 		case "item.completed":
 			metrics.onItem(event.Type, event.Item, time.Now())
+			if server := failedRequiredMCPAuthorization(event.Item, requiredMCPServers); server != "" {
+				return &MCPAuthorizationError{Server: server}
+			}
 			if event.Item != nil && event.Item.Type == "agent_message" {
 				*lastMessage = event.Item.Text
 				if onChunk != nil {
@@ -398,6 +448,29 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 	}
 
 	return scanner.Err()
+}
+
+func failedRequiredMCPAuthorization(item *codexItem, required []string) string {
+	if item == nil || item.Type != "mcp_tool_call" || item.Server == "" || len(item.Error) == 0 {
+		return ""
+	}
+	matched := ""
+	for _, server := range required {
+		if server == "cloudflare" && server == item.Server {
+			matched = server
+			break
+		}
+	}
+	if matched == "" {
+		return ""
+	}
+	message := strings.ToLower(string(item.Error))
+	for _, marker := range []string{"authrequired", "authentication required", "authorization required", "not authenticated", "not authorized", "unauthorized", "oauth"} {
+		if strings.Contains(message, marker) {
+			return matched
+		}
+	}
+	return ""
 }
 
 func codexOutputSchema(schema json.RawMessage) ([]byte, error) {

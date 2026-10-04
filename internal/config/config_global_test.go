@@ -205,6 +205,39 @@ func TestLoadGlobal_ReviewAgentTimeout(t *testing.T) {
 	}
 }
 
+func TestLoadGlobal_WorkingTimeoutUnsetAndRejectsAShorterCap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("agent_timeout: 30m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if cfg.AgentWorkingTimeout != 0 || cfg.ReviewAgentWorkingTimeout != 0 || cfg.TestAgentWorkingTimeout != 0 {
+		t.Fatalf("working caps = %s %s %s, want unset", cfg.AgentWorkingTimeout, cfg.ReviewAgentWorkingTimeout, cfg.TestAgentWorkingTimeout)
+	}
+
+	if err := os.WriteFile(path, []byte("agent_timeout: 30m\nagent_working_timeout: 10m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadGlobal(path); err == nil || !strings.Contains(err.Error(), "agent_working_timeout") {
+		t.Fatalf("short cap error = %v, want agent_working_timeout rejected", err)
+	}
+
+	if err := os.WriteFile(path, []byte("agent_timeout: 30m\nagent_working_timeout: 45m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if cfg.AgentWorkingTimeout != 45*time.Minute {
+		t.Fatalf("agent_working_timeout = %s, want 45m", cfg.AgentWorkingTimeout)
+	}
+}
+
 func TestLoadGlobal_TestAgentTimeout(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -811,5 +844,19 @@ func TestLoadGlobal_AutoFixPartial(t *testing.T) {
 	// Unset fields should remain nil
 	if cfg.AutoFix.Test != nil {
 		t.Errorf("test = %v, want nil", cfg.AutoFix.Test)
+	}
+}
+
+func TestLoadGlobal_LongInvocationBudgets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("agent_timeout: 12h\nreview_agent_timeout: 16h\ntest_agent_timeout: 24h\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentTimeout != 12*time.Hour || cfg.ReviewAgentTimeout != 16*time.Hour || cfg.TestAgentTimeout != 24*time.Hour {
+		t.Fatalf("loaded budgets = %v %v %v", cfg.AgentTimeout, cfg.ReviewAgentTimeout, cfg.TestAgentTimeout)
 	}
 }

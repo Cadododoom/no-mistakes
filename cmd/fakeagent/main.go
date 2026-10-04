@@ -30,6 +30,10 @@ func main() {
 func run(argv []string) int {
 	name := agentNameFromArgv0(argv[0])
 	args := argv[1:]
+	if name == "codex" && len(args) >= 2 && args[0] == "mcp" && args[1] == "list" {
+		fmt.Println("[]")
+		return 0
+	}
 
 	scenario, err := loadScenario(os.Getenv("FAKEAGENT_SCENARIO"))
 	if err != nil {
@@ -65,8 +69,11 @@ func run(argv []string) int {
 // returns non-zero (so SCM detection treats GitHub as unauthenticated)
 // and any other subcommand prints a clear error.
 func runGhStub(args []string) int {
-	if os.Getenv("FAKEAGENT_GH_MODE") == "fork-pr" {
+	switch os.Getenv("FAKEAGENT_GH_MODE") {
+	case "fork-pr":
 		return runGhForkPRStub(args)
+	case "stateful-pr":
+		return runGhStatefulPRStub(args)
 	}
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		fmt.Fprintln(os.Stderr, "fakeagent gh: not authenticated (e2e stub)")

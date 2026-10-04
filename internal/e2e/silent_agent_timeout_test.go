@@ -63,7 +63,7 @@ func silentAgentScenario(t *testing.T) string {
 // busy one, and a crashed one were indistinguishable, and two silent 30-minute
 // timeouts on one task produced no evidence to act on.
 //
-// The budgets here are seconds rather than the production 30 minutes; the
+// The budgets here are seconds rather than the production eight hours; the
 // timeout path is identical, and the test must never be "fixed" by raising them.
 func TestSilentAgentTimeoutReportsMeasuredEvidence(t *testing.T) {
 	h := NewHarness(t, SetupOpts{
@@ -85,8 +85,8 @@ func TestSilentAgentTimeoutReportsMeasuredEvidence(t *testing.T) {
 	operator := h.AddWorktree("feature/silent-agent")
 
 	runOut, runErr := h.RunInDir(operator, "axi", "run", "--intent", "validate the feature while the agent is wedged")
-	if runErr == nil {
-		t.Fatalf("expected the wedged review agent to fail the run:\n%s", runOut)
+	if runErr != nil {
+		t.Fatalf("expected the wedged review agent to return a recovery gate:\n%s", runOut)
 	}
 
 	statusOut, _ := h.RunInDir(operator, "axi", "status")
@@ -97,9 +97,9 @@ func TestSilentAgentTimeoutReportsMeasuredEvidence(t *testing.T) {
 	t.Logf("stock axi status surface:\n%s", statusOut)
 	surfaces := runOut + "\n" + statusOut
 
-	// The absolute wall-clock limit that expired must be named...
-	if !strings.Contains(surfaces, "reached its absolute wall-clock limit after 3s") {
-		t.Fatalf("axi surfaces did not name the expired review wall-clock limit:\n--- run ---\n%s\n--- status ---\n%s", runOut, statusOut)
+	// The stall budget that expired must be named...
+	if !strings.Contains(surfaces, "reached its invocation budget after 3s") {
+		t.Fatalf("axi surfaces did not name the expired review stall budget:\n--- run ---\n%s\n--- status ---\n%s", runOut, statusOut)
 	}
 	// ...and the silence must be a measurement, not the budget restated.
 	if !strings.Contains(surfaces, "produced no output at all") {
@@ -113,8 +113,8 @@ func TestSilentAgentTimeoutReportsMeasuredEvidence(t *testing.T) {
 	if !strings.Contains(surfaces, "after its subprocess started") {
 		t.Fatalf("axi surfaces did not distinguish a launched agent from one that never ran:\n--- run ---\n%s\n--- status ---\n%s", runOut, statusOut)
 	}
-	// The adapter's own account of the killed process survives to the operator.
-	if !strings.Contains(surfaces, "agent reported:") {
-		t.Fatalf("axi surfaces discarded the adapter's report:\n--- run ---\n%s\n--- status ---\n%s", runOut, statusOut)
+	// Gate evidence retains measured activity without free-form adapter output.
+	if strings.Contains(surfaces, "agent reported:") {
+		t.Fatalf("axi recovery gate exposed the adapter's free-form report:\n--- run ---\n%s\n--- status ---\n%s", runOut, statusOut)
 	}
 }

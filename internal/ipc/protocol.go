@@ -11,27 +11,29 @@ import (
 
 // JSON-RPC 2.0 method names.
 const (
-	MethodPushReceived            = "push_received"
-	MethodResolvePiProfile        = "resolve_pi_profile"
-	MethodProbeOmitIntent         = "probe_omit_intent"
-	MethodReleaseVerificationPlan = "release_verification_plan"
-	MethodCaptureVerificationPlan = "capture_verification_plan"
-	MethodStartFreshRun           = "start_fresh_run"
-	MethodClaimLaunchReceipt      = "claim_launch_receipt"
-	MethodGetRun                  = "get_run"
-	MethodGetStepDiff             = "get_step_diff"
-	MethodGetRuns                 = "get_runs"
-	MethodGetRunsForHead          = "get_runs_for_head"
-	MethodGetActiveRun            = "get_active_run"
-	MethodRerun                   = "rerun"
-	MethodSubscribe               = "subscribe"
-	MethodRespond                 = "respond"
-	MethodAnswerReview            = "answer_review_question"
-	MethodCancelRun               = "cancel_run"
-	MethodGateContext             = "gate_context"
-	MethodAdmitPush               = "admit_push"
-	MethodHealth                  = "health"
-	MethodShutdown                = "shutdown"
+	MethodPushReceived              = "push_received"
+	MethodResolvePiProfile          = "resolve_pi_profile"
+	MethodProbeOmitIntent           = "probe_omit_intent"
+	MethodReleaseVerificationPlan   = "release_verification_plan"
+	MethodCaptureVerificationPlan   = "capture_verification_plan"
+	MethodStartFreshRun             = "start_fresh_run"
+	MethodClaimLaunchReceipt        = "claim_launch_receipt"
+	MethodGetRun                    = "get_run"
+	MethodGetStepDiff               = "get_step_diff"
+	MethodGetRuns                   = "get_runs"
+	MethodGetRunsForHead            = "get_runs_for_head"
+	MethodGetActiveRun              = "get_active_run"
+	MethodRerun                     = "rerun"
+	MethodSubscribe                 = "subscribe"
+	MethodRespond                   = "respond"
+	MethodAnswerReview              = "answer_review_question"
+	MethodCancelRun                 = "cancel_run"
+	MethodGateContext               = "gate_context"
+	MethodAdmitPush                 = "admit_push"
+	MethodHealth                    = "health"
+	MethodShutdown                  = "shutdown"
+	MethodUpdateRunClosingIssueRefs = "update_run_closing_issue_refs"
+	MethodProbeMCPReadiness         = "probe_mcp_readiness"
 )
 
 // JSON-RPC 2.0 error codes.
@@ -76,8 +78,9 @@ func (e *RPCError) Error() string { return e.Message }
 // intent from local transcripts. LaunchNonce and ValidationGeneration together
 // opt into a nonce-bound launch proof.
 type PushReceivedParams struct {
-	VerificationPlanID string              `json:"verification_plan_id,omitempty"`
-	PiProfile          *agentcfg.PiProfile `json:"pi_profile,omitempty"`
+	VerificationPlanID string                 `json:"verification_plan_id,omitempty"`
+	PiProfile          *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
+	RequiredMCP        []types.MCPRequirement `json:"required_mcp,omitempty"`
 	// Gate is the absolute path to the gate bare repo.
 	Gate                 string           `json:"gate"`
 	Ref                  string           `json:"ref"`
@@ -97,14 +100,18 @@ type PushReceivedParams struct {
 	// branch, so the hook reports no previous head of its own. It is a claim the
 	// daemon accepts only against the gate's own archive tag.
 	ReconciledPreviousHead string `json:"reconciled_previous_head,omitempty"`
+	// ClosingIssueRefs are the explicit issues (axi run --closes) the
+	// generated PR should close.
+	ClosingIssueRefs []string `json:"closing_issue_refs,omitempty"`
 }
 
 // StartFreshRunParams requests a nonce-bound fresh launch for one exact gate
 // branch head. The daemon checks the gate while holding the branch lock, so a
 // caller never receives a proof for a drifting creation context.
 type StartFreshRunParams struct {
-	VerificationPlanID string              `json:"verification_plan_id,omitempty"`
-	PiProfile          *agentcfg.PiProfile `json:"pi_profile,omitempty"`
+	VerificationPlanID string                 `json:"verification_plan_id,omitempty"`
+	PiProfile          *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
+	RequiredMCP        []types.MCPRequirement `json:"required_mcp,omitempty"`
 
 	RepoID               string           `json:"repo_id"`
 	Branch               string           `json:"branch"`
@@ -115,6 +122,7 @@ type StartFreshRunParams struct {
 	ValidationGeneration string           `json:"validation_generation"`
 	PRBaseBranch         string           `json:"pr_base_branch,omitempty"`
 	OmitIntent           bool             `json:"omit_intent,omitempty"`
+	ClosingIssueRefs     []string         `json:"closing_issue_refs,omitempty"`
 }
 
 // CaptureVerificationPlanParams requests a snapshot before the caller pushes.
@@ -147,10 +155,17 @@ type ProbeOmitIntentResult struct {
 	OK bool `json:"ok"`
 }
 
+// ProbeMCPReadinessResult prevents a newer client from launching declared
+// dependencies through an older daemon that silently drops unknown fields.
+type ProbeMCPReadinessResult struct {
+	OK bool `json:"ok"`
+}
+
 // ClaimLaunchReceiptParams identifies one exact opaque receipt binding.
 // Generic run/status surfaces never expose launch bindings or intent digests.
 type ClaimLaunchReceiptParams struct {
-	PiProfile *agentcfg.PiProfile `json:"pi_profile,omitempty"`
+	PiProfile   *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
+	RequiredMCP []types.MCPRequirement `json:"required_mcp,omitempty"`
 
 	RepoID               string `json:"repo_id"`
 	Branch               string `json:"branch"`
@@ -211,9 +226,11 @@ type GetActiveRunParams struct {
 // Intent, when set, overrides inherited intent and fresh inference. When empty,
 // the daemon inherits authoritative intent from the selected prior run or
 // leaves the new run to perform fresh inference.
+// ClosingIssueRefs are merged with the selected run's persisted references.
 type RerunParams struct {
-	VerificationPlanID string              `json:"verification_plan_id,omitempty"`
-	PiProfile          *agentcfg.PiProfile `json:"pi_profile,omitempty"`
+	VerificationPlanID string                 `json:"verification_plan_id,omitempty"`
+	PiProfile          *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
+	RequiredMCP        []types.MCPRequirement `json:"required_mcp,omitempty"`
 
 	RepoID        string           `json:"repo_id"`
 	Branch        string           `json:"branch"`
@@ -228,6 +245,9 @@ type RerunParams struct {
 	// CallerHeadSHA is a clean caller worktree's HEAD, when known. It guards
 	// the daemon's selected head; it never supplies a replacement run head.
 	CallerHeadSHA string `json:"caller_head_sha,omitempty"`
+	// ClosingIssueRefs are added to the references the selected run carried;
+	// a rerun never drops an inherited closing reference.
+	ClosingIssueRefs []string `json:"closing_issue_refs,omitempty"`
 }
 
 // SubscribeParams starts an event stream for a run.
@@ -275,6 +295,26 @@ type HealthParams struct{}
 
 // ShutdownParams has no fields but exists for consistency.
 type ShutdownParams struct{}
+
+// UpdateRunClosingIssueRefsParams updates the closing issue references on an existing run.
+type UpdateRunClosingIssueRefsParams struct {
+	RunID            string   `json:"run_id"`
+	ClosingIssueRefs []string `json:"closing_issue_refs"`
+}
+
+// ClosingIssueRefsRejectedPRBodyComposed is the Reason reported when the run's PR
+// body was already composed, so the closing issue references could no longer reach its
+// Issues section. It is a rejection rather than a transport error because retrying
+// cannot help: the caller must edit the PR or start a fresh run.
+const ClosingIssueRefsRejectedPRBodyComposed = "pr_body_already_composed"
+
+// UpdateRunClosingIssueRefsResult is the result of UpdateRunClosingIssueRefs. OK is false
+// for a refused update, with Reason naming why so the caller can give advice
+// that fits instead of matching on error prose.
+type UpdateRunClosingIssueRefsResult struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+}
 
 // --- Method results ---
 
@@ -408,6 +448,7 @@ type ShutdownResult struct {
 type RunInfo struct {
 	VerificationPlan *verificationplan.Snapshot `json:"verification_plan"`
 	PiProfile        *agentcfg.PiProfile        `json:"pi_profile,omitempty"`
+	RequiredMCP      []types.MCPRequirement     `json:"required_mcp,omitempty"`
 
 	ID               string          `json:"id"`
 	RepoID           string          `json:"repo_id"`

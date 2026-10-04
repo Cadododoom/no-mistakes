@@ -117,6 +117,12 @@ const FindingCategoryReviewQuestion = "review-question"
 // recorded as an override rather than a silent green completion.
 const FindingCategoryTestCommand = "test-command"
 
+// FindingCategoryMCPAuthorization marks a parked stage that declared a Codex
+// MCP dependency but could not verify authorization in the daemon executor.
+const FindingCategoryMCPAuthorization = "mcp-authorization"
+
+const FindingIDMCPAuthorizationRequired = "mcp-authorization-required"
+
 // FindingIDTestAgentTimeout is the Test-step park when an evidence or repair
 // invocation burned its wall-clock budget. It is a budget/provider-slowness
 // cut, not a product defect; TestOverrideReason treats an approval of this
@@ -128,6 +134,18 @@ const FindingIDTestAgentTimeout = "test-agent-timeout"
 // executor refuses Approve on that gate: the steps after Test would commit and
 // publish the work.
 const FindingIDTestAgentUnvalidatedWork = "test-agent-unvalidated-work"
+
+// FindingIDTestAgentIncomplete parks a Test invocation that exited before a
+// complete evidence turn. A fix response can retry it without discarding work.
+const FindingIDTestAgentIncomplete = "test-agent-incomplete"
+
+// Review invocation recovery findings park a run whose current head has not
+// passed a complete Review turn. The worktree remains owned by the run so an
+// operator can retry Review or abort without discarding interrupted work.
+const (
+	FindingIDReviewAgentIncomplete      = "review-agent-incomplete"
+	FindingIDReviewAgentUnvalidatedWork = "review-agent-unvalidated-work"
+)
 
 // Test scenario result constants: the vocabulary the test step's evidence
 // prompt instructs the agent to use for each derived scenario.
@@ -207,6 +225,21 @@ type Finding struct {
 	// every non-CI finding.
 	Check   string `json:"check,omitempty"`
 	CheckID string `json:"check_id,omitempty"`
+	// AuthorizationRequired is the typed, secret-free handoff for a required
+	// MCP dependency the daemon executor could not authorize.
+	AuthorizationRequired *MCPAuthorizationRequired `json:"authorization_required,omitempty"`
+}
+
+// MCPAuthorizationRequired is safe for a supervisor to relay in a human gate.
+// NextAction is a copyable login command using the same Codex home and binary
+// as the daemon executor; it never contains credential material.
+type MCPAuthorizationRequired struct {
+	Provider        string `json:"provider"`
+	Server          string `json:"server"`
+	Stage           string `json:"stage"`
+	Status          string `json:"status"`
+	ExecutorContext string `json:"executor_context"`
+	NextAction      string `json:"next_action"`
 }
 
 // TestScenario is one named end-to-end scenario the test step derived from the
@@ -265,19 +298,20 @@ type TestArtifact struct {
 }
 
 type findingWire struct {
-	ID                  string `json:"id,omitempty"`
-	Severity            string `json:"severity"`
-	File                string `json:"file,omitempty"`
-	Line                int    `json:"line,omitempty"`
-	Description         string `json:"description"`
-	Action              string `json:"action"`
-	Source              string `json:"source,omitempty"`
-	UserInstructions    string `json:"user_instructions,omitempty"`
-	ReviewScope         string `json:"review_scope,omitempty"`
-	Category            string `json:"category,omitempty"`
-	Check               string `json:"check,omitempty"`
-	CheckID             string `json:"check_id,omitempty"`
-	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
+	ID                    string                    `json:"id,omitempty"`
+	Severity              string                    `json:"severity"`
+	File                  string                    `json:"file,omitempty"`
+	Line                  int                       `json:"line,omitempty"`
+	Description           string                    `json:"description"`
+	Action                string                    `json:"action"`
+	Source                string                    `json:"source,omitempty"`
+	UserInstructions      string                    `json:"user_instructions,omitempty"`
+	ReviewScope           string                    `json:"review_scope,omitempty"`
+	Category              string                    `json:"category,omitempty"`
+	Check                 string                    `json:"check,omitempty"`
+	CheckID               string                    `json:"check_id,omitempty"`
+	RequiresHumanReview   *bool                     `json:"requires_human_review,omitempty"`
+	AuthorizationRequired *MCPAuthorizationRequired `json:"authorization_required,omitempty"`
 }
 
 // WithdrawnFinding is one carried finding an answer round retracted, naming
@@ -308,20 +342,17 @@ type Findings struct {
 	// reason. On an answer round a carried finding leaves the outstanding set
 	// ONLY by appearing here. Silence keeps it, so covering a file can no
 	// longer clear an unrelated finding in it. Empty on every other payload.
-	WithdrawnFindings []WithdrawnFinding `json:"withdrawn_findings,omitempty"`
-	Tested            []string           `json:"tested,omitempty"`
-	TestingSummary    string             `json:"testing_summary,omitempty"`
-	Artifacts         []TestArtifact     `json:"artifacts,omitempty"`
-	Scenarios         []TestScenario     `json:"scenarios,omitempty"`
-	Verdict           string             `json:"verdict,omitempty"`
-	TestedHeadSHA     string             `json:"tested_head_sha,omitempty"`
-	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
-	// unvalidated-work check measured from, carried so a repeated cut before any
-	// evidence turn completes re-measures from that same head.
-	UnvalidatedSinceSHA string `json:"unvalidated_since_sha,omitempty"`
-	RiskLevel           string `json:"risk_level"`
-	RiskRationale       string `json:"risk_rationale"`
-	RiskScope           string `json:"risk_scope,omitempty"`
+	WithdrawnFindings   []WithdrawnFinding `json:"withdrawn_findings,omitempty"`
+	Tested              []string           `json:"tested,omitempty"`
+	TestingSummary      string             `json:"testing_summary,omitempty"`
+	Artifacts           []TestArtifact     `json:"artifacts,omitempty"`
+	Scenarios           []TestScenario     `json:"scenarios,omitempty"`
+	Verdict             string             `json:"verdict,omitempty"`
+	TestedHeadSHA       string             `json:"tested_head_sha,omitempty"`
+	UnvalidatedSinceSHA string             `json:"unvalidated_since_sha,omitempty"`
+	RiskLevel           string             `json:"risk_level"`
+	RiskRationale       string             `json:"risk_rationale"`
+	RiskScope           string             `json:"risk_scope,omitempty"`
 }
 
 type findingsWire struct {
@@ -622,6 +653,7 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Category = wire.Category
 	f.Check = wire.Check
 	f.CheckID = wire.CheckID
+	f.AuthorizationRequired = wire.AuthorizationRequired
 	if f.Action == "" && wire.RequiresHumanReview != nil {
 		if *wire.RequiresHumanReview {
 			f.Action = ActionAskUser

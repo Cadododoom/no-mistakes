@@ -63,6 +63,11 @@ func TestApplyToProcess_SetsResolvedEnvEntries(t *testing.T) {
 	resetForTests()
 	t.Setenv("SHELL", "/bin/zsh")
 	t.Setenv("KEEP_ME", "1")
+	// ApplyToProcess mutates these keys; restore them before later subprocess
+	// tests, including on hosts whose tools exist only on the original PATH.
+	for _, key := range []string{"PATH", "HOME", "SPECIAL"} {
+		t.Setenv(key, os.Getenv(key))
+	}
 
 	oldOutput := shellCommandOutput
 	defer func() {
@@ -98,6 +103,9 @@ func TestApplyToProcessWithShellRetryExcept_PreservesExcludedEntry(t *testing.T)
 	resetForTests()
 	t.Setenv("SHELL", "/bin/zsh")
 	t.Setenv("NM_HOME", "/service/root")
+	for _, key := range []string{"PATH", "SPECIAL"} {
+		t.Setenv(key, os.Getenv(key))
+	}
 
 	oldOutput := shellCommandOutput
 	defer func() {

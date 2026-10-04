@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS runs (
     omit_intent          INTEGER NOT NULL DEFAULT 0,
     pi_profile           TEXT,
     verification_plan    TEXT,
+    required_mcp_json    TEXT NOT NULL DEFAULT '',
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
@@ -241,6 +242,8 @@ var migrationStatements = []string{
 	`CREATE TRIGGER IF NOT EXISTS runs_verification_plan_immutable BEFORE UPDATE OF verification_plan ON runs WHEN NEW.verification_plan IS NOT OLD.verification_plan BEGIN SELECT RAISE(ABORT, 'run verification plan is immutable'); END`,
 	`ALTER TABLE runs ADD COLUMN pi_profile TEXT`,
 	`CREATE TRIGGER IF NOT EXISTS runs_pi_profile_immutable BEFORE UPDATE OF pi_profile ON runs WHEN NEW.pi_profile IS NOT OLD.pi_profile BEGIN SELECT RAISE(ABORT, 'run Pi profile is immutable'); END`,
+	`ALTER TABLE runs ADD COLUMN required_mcp_json TEXT NOT NULL DEFAULT ''`,
+	`CREATE TRIGGER IF NOT EXISTS runs_required_mcp_immutable BEFORE UPDATE OF required_mcp_json ON runs WHEN NEW.required_mcp_json IS NOT OLD.required_mcp_json BEGIN SELECT RAISE(ABORT, 'run MCP requirements are immutable'); END`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
@@ -369,4 +372,12 @@ var migrationStatements = []string{
 	`ALTER TABLE agent_invocations ADD COLUMN workload_lines INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN finding_count INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN approval_reason TEXT`,
+	// Explicit axi run --closes references for the PR body Issues section (nullable;
+	// NULL means none).
+	`ALTER TABLE runs ADD COLUMN closing_issue_refs TEXT`,
+	// Set once, atomically with the read that resolves the closing issue references into
+	// the PR body. NULL means no PR body has sampled the closing issue references yet, so
+	// a late --closes can still reach the Issues section; non-NULL closes that window
+	// (see UpdateRunClosingIssueRefs / ClaimClosingIssueRefsForPRBody).
+	`ALTER TABLE runs ADD COLUMN closing_issue_refs_locked_at INTEGER`,
 }

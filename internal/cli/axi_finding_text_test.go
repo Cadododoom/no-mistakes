@@ -54,6 +54,51 @@ func TestGateRendersFindingDescriptionsVerbatim(t *testing.T) {
 	}
 }
 
+func TestMCPAuthorizationGateRendersStructuredHandoff(t *testing.T) {
+	gate := stepView{
+		Name:   string(types.StepTest),
+		Status: string(types.StepStatusAwaitingApproval),
+		FindingsJSON: findingsJSON(t, []types.Finding{{
+			ID:          types.FindingIDMCPAuthorizationRequired,
+			Severity:    types.FindingSeverityWarning,
+			Action:      types.ActionAskUser,
+			Category:    types.FindingCategoryMCPAuthorization,
+			Description: "Cloudflare authorization is required before Test can continue.",
+			AuthorizationRequired: &types.MCPAuthorizationRequired{
+				Provider:        "cloudflare",
+				Server:          "cloudflare",
+				Stage:           "test",
+				Status:          types.MCPStatusAuthorizationRequiredDuringProbe,
+				ExecutorContext: "daemon CODEX_HOME=/daemon/.codex",
+				NextAction:      "CODEX_HOME='/daemon/.codex' codex mcp login cloudflare --no-browser",
+			},
+		}}, "Required MCP authorization is unavailable"),
+	}
+	var doc struct {
+		Gate struct {
+			AuthorizationRequired struct {
+				Provider        string `toon:"provider"`
+				Server          string `toon:"server"`
+				Stage           string `toon:"stage"`
+				Status          string `toon:"status"`
+				ExecutorContext string `toon:"executor_context"`
+				NextAction      string `toon:"next_action"`
+			} `toon:"authorization_required"`
+		} `toon:"gate"`
+	}
+	out := axiDoc(gateFields(gate)...)
+	if err := toon.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("decode gate: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "no-mistakes axi respond --action fix --findings "+types.FindingIDMCPAuthorizationRequired) {
+		t.Fatalf("authorization recovery command omitted finding selection: %s", out)
+	}
+	got := doc.Gate.AuthorizationRequired
+	if got.Provider != "cloudflare" || got.Server != "cloudflare" || got.Stage != "test" || got.Status != types.MCPStatusAuthorizationRequiredDuringProbe || got.ExecutorContext != "daemon CODEX_HOME=/daemon/.codex" || got.NextAction != "CODEX_HOME='/daemon/.codex' codex mcp login cloudflare --no-browser" {
+		t.Fatalf("structured authorization handoff = %+v\n%s", got, out)
+	}
+}
+
 // After a gate resolves, status only counts a step's findings, so `axi logs`
 // is the read path for their text; the summary stays bounded unless --full.
 func TestAxiLogsRendersRecordedFindingsAfterTheGateResolves(t *testing.T) {

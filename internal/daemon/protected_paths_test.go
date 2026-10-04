@@ -23,6 +23,63 @@ type protectedPathPushRetryStep struct {
 	edited bool
 }
 
+func TestInterruptedUnvalidatedWorkSurvivesAbortAndStartupCleanup(t *testing.T) {
+	for _, stage := range []types.StepName{types.StepReview, types.StepTest} {
+		t.Run(string(stage), func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			repo, head := setupTestGitRepo(t, p, database, "interrupted-preservation")
+			run, err := database.InsertRun(repo.ID, "main", head, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workDir := p.WorktreeDir(repo.ID, run.ID)
+			if err := git.WorktreeAdd(t.Context(), p.RepoDir(repo.ID), workDir, head); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workDir, "partial.txt"), []byte("unvalidated work"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sr, err := database.InsertStepResult(run.ID, stage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := types.FindingIDReviewAgentUnvalidatedWork
+			if stage == types.StepTest {
+				id = types.FindingIDTestAgentUnvalidatedWork
+			}
+			authorization := pipeline.MCPAuthorizationOutcome(stage, types.MCPProbeResult{}, false)
+			findings, err := types.ParseFindingsJSON(authorization.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings.Items = append(findings.Items, types.Finding{ID: id, Severity: "error", Action: "ask-user", Description: "unvalidated work"})
+			payload, _ := types.MarshalFindingsJSON(findings)
+			if err := database.SetStepFindings(sr.ID, payload); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateStepStatusWithDuration(sr.ID, types.StepStatusFailed, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunErrorStatus(run.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled); err != nil {
+				t.Fatal(err)
+			}
+			cleanupOrphanWorktrees(database, p, nil)
+			data, err := os.ReadFile(filepath.Join(workDir, "partial.txt"))
+			if err != nil || string(data) != "unvalidated work" {
+				t.Fatalf("interrupted work was discarded: %q, %v", data, err)
+			}
+		})
+	}
+}
+
 func TestProtectedPathRefusalCancellationCleanup(t *testing.T) {
 	for _, action := range []string{"new_push", "cancel_run", "abort_response"} {
 		t.Run(action, func(t *testing.T) {
