@@ -848,9 +848,15 @@ func TestLoadGlobal_AutoFixPartial(t *testing.T) {
 }
 
 func TestLoadGlobal_LongInvocationBudgets(t *testing.T) {
- path := filepath.Join(t.TempDir(), "config.yaml")
- if err := os.WriteFile(path, []byte("agent_timeout: 12h\nreview_agent_timeout: 16h\ntest_agent_timeout: 24h\n"), 0o644); err != nil { t.Fatal(err) }
- cfg, err := LoadGlobal(path)
- if err != nil { t.Fatal(err) }
- if cfg.AgentTimeout != 12*time.Hour || cfg.ReviewAgentTimeout != 16*time.Hour || cfg.TestAgentTimeout != 24*time.Hour { t.Fatalf("loaded budgets = %v %v %v", cfg.AgentTimeout, cfg.ReviewAgentTimeout, cfg.TestAgentTimeout) }
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("agent_timeout: 12h\nreview_agent_timeout: 16h\ntest_agent_timeout: 24h\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentTimeout != 12*time.Hour || cfg.ReviewAgentTimeout != 16*time.Hour || cfg.TestAgentTimeout != 24*time.Hour {
+		t.Fatalf("loaded budgets = %v %v %v", cfg.AgentTimeout, cfg.ReviewAgentTimeout, cfg.TestAgentTimeout)
+	}
 }

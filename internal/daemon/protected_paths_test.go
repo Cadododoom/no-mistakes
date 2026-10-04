@@ -56,10 +56,12 @@ func TestInterruptedUnvalidatedWorkSurvivesAbortAndStartupCleanup(t *testing.T) 
 				id = types.FindingIDTestAgentUnvalidatedWork
 			}
 			authorization := pipeline.MCPAuthorizationOutcome(stage, types.MCPProbeResult{}, false)
-   findings, err := types.ParseFindingsJSON(authorization.Findings)
-   if err != nil { t.Fatal(err) }
-   findings.Items = append(findings.Items, types.Finding{ID: id, Severity: "error", Action: "ask-user", Description: "unvalidated work"})
-   payload, _ := types.MarshalFindingsJSON(findings)
+			findings, err := types.ParseFindingsJSON(authorization.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings.Items = append(findings.Items, types.Finding{ID: id, Severity: "error", Action: "ask-user", Description: "unvalidated work"})
+			payload, _ := types.MarshalFindingsJSON(findings)
 			if err := database.SetStepFindings(sr.ID, payload); err != nil {
 				t.Fatal(err)
 			}

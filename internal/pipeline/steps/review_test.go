@@ -336,7 +336,7 @@ func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
 	const (
-		timeout    = 8 * time.Hour
+		timeout = 8 * time.Hour
 	)
 	type call struct {
 		fixTurn   bool

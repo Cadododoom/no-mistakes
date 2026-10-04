@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"strconv"
 	"testing"
- "time"
+	"time"
 )
 
 const agentExitTestCodeEnv = "NO_MISTAKES_AGENT_EXIT_TEST_CODE"
@@ -24,9 +24,11 @@ func TestAgentProcessExitHelper(t *testing.T) {
 		return
 	}
 	if raw == "hang" {
-  for { time.Sleep(time.Second) }
- }
- code, err := strconv.Atoi(raw)
+		for {
+			time.Sleep(time.Second)
+		}
+	}
+	code, err := strconv.Atoi(raw)
 	if err != nil {
 		t.Fatal(err)
 	}

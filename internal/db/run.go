@@ -103,8 +103,8 @@ type Run struct {
 	ClosingIssueRefsLockedAt *int64
 	// RequiredMCPJSON is the immutable stage/server dependency declaration.
 	RequiredMCPJSON string
-	CreatedAt                int64
-	UpdatedAt                int64
+	CreatedAt       int64
+	UpdatedAt       int64
 }
 
 const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, COALESCE(required_mcp_json, ''), created_at, updated_at`
@@ -144,7 +144,6 @@ func (r *Run) MCPRequirements() ([]types.MCPRequirement, error) {
 	}
 	return types.ParseMCPRequirements(r.RequiredMCPJSON)
 }
-
 
 // WorktreePath returns the recorded worktree directory of this run, or "" for
 // a run recorded before placement was durable. Callers resolve the empty case

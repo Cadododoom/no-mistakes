@@ -342,17 +342,17 @@ type Findings struct {
 	// reason. On an answer round a carried finding leaves the outstanding set
 	// ONLY by appearing here. Silence keeps it, so covering a file can no
 	// longer clear an unrelated finding in it. Empty on every other payload.
-	WithdrawnFindings []WithdrawnFinding `json:"withdrawn_findings,omitempty"`
-	Tested            []string           `json:"tested,omitempty"`
-	TestingSummary    string             `json:"testing_summary,omitempty"`
-	Artifacts         []TestArtifact     `json:"artifacts,omitempty"`
-	Scenarios         []TestScenario     `json:"scenarios,omitempty"`
-	Verdict           string             `json:"verdict,omitempty"`
-	TestedHeadSHA     string             `json:"tested_head_sha,omitempty"`
-	UnvalidatedSinceSHA string `json:"unvalidated_since_sha,omitempty"`
-	RiskLevel           string `json:"risk_level"`
-	RiskRationale       string `json:"risk_rationale"`
-	RiskScope           string `json:"risk_scope,omitempty"`
+	WithdrawnFindings   []WithdrawnFinding `json:"withdrawn_findings,omitempty"`
+	Tested              []string           `json:"tested,omitempty"`
+	TestingSummary      string             `json:"testing_summary,omitempty"`
+	Artifacts           []TestArtifact     `json:"artifacts,omitempty"`
+	Scenarios           []TestScenario     `json:"scenarios,omitempty"`
+	Verdict             string             `json:"verdict,omitempty"`
+	TestedHeadSHA       string             `json:"tested_head_sha,omitempty"`
+	UnvalidatedSinceSHA string             `json:"unvalidated_since_sha,omitempty"`
+	RiskLevel           string             `json:"risk_level"`
+	RiskRationale       string             `json:"risk_rationale"`
+	RiskScope           string             `json:"risk_scope,omitempty"`
 }
 
 type findingsWire struct {

@@ -597,46 +597,47 @@ func unvalidatedAgentWork(sctx *pipeline.StepContext, stage types.StepName, vali
 	return strings.Join(parts, "; ")
 }
 
-
 func interruptedWorkFinding(sctx *pipeline.StepContext, stage types.StepName, baseline string) *types.Finding {
- id := types.FindingIDReviewAgentUnvalidatedWork
- if stage == types.StepTest {
-  id = types.FindingIDTestAgentUnvalidatedWork
- }
- if work := unvalidatedAgentWork(sctx, stage, baseline); work != "" {
-  return &types.Finding{
-   ID: id,
-   Severity: types.FindingSeverityError,
-   Action: types.ActionAskUser,
-   Description: "The interrupted invocation left work that no complete validation turn certified: " + work + ". Respond with fix to preserve and validate it, or abort.",
-  }
- }
- for _, raw := range []string{sctx.PreviousFindings, sctx.DeferredFindings} {
-  findings, err := types.ParseFindingsJSON(raw)
-  if err != nil {
-   continue
-  }
-  for _, finding := range findings.Items {
-   if finding.ID == id {
-    return &finding
-   }
-  }
- }
- return nil
+	id := types.FindingIDReviewAgentUnvalidatedWork
+	if stage == types.StepTest {
+		id = types.FindingIDTestAgentUnvalidatedWork
+	}
+	if work := unvalidatedAgentWork(sctx, stage, baseline); work != "" {
+		return &types.Finding{
+			ID:          id,
+			Severity:    types.FindingSeverityError,
+			Action:      types.ActionAskUser,
+			Description: "The interrupted invocation left work that no complete validation turn certified: " + work + ". Respond with fix to preserve and validate it, or abort.",
+		}
+	}
+	for _, raw := range []string{sctx.PreviousFindings, sctx.DeferredFindings} {
+		findings, err := types.ParseFindingsJSON(raw)
+		if err != nil {
+			continue
+		}
+		for _, finding := range findings.Items {
+			if finding.ID == id {
+				return &finding
+			}
+		}
+	}
+	return nil
 }
 
 func (s *ReviewStep) InterruptedWorkFindings(sctx *pipeline.StepContext) (string, error) {
- return interruptedWorkFindings(sctx, s.Name())
+	return interruptedWorkFindings(sctx, s.Name())
 }
 
 func (s *TestStep) InterruptedWorkFindings(sctx *pipeline.StepContext) (string, error) {
- return interruptedWorkFindings(sctx, s.Name())
+	return interruptedWorkFindings(sctx, s.Name())
 }
 
 func interruptedWorkFindings(sctx *pipeline.StepContext, stage types.StepName) (string, error) {
- baseline := interruptedWorkBaseline(sctx)
- finding := interruptedWorkFinding(sctx, stage, baseline)
- if finding == nil { return "", nil }
- findings := types.Findings{Items: []types.Finding{*finding}, UnvalidatedSinceSHA: baseline}
- return types.MarshalFindingsJSON(findings)
+	baseline := interruptedWorkBaseline(sctx)
+	finding := interruptedWorkFinding(sctx, stage, baseline)
+	if finding == nil {
+		return "", nil
+	}
+	findings := types.Findings{Items: []types.Finding{*finding}, UnvalidatedSinceSHA: baseline}
+	return types.MarshalFindingsJSON(findings)
 }

@@ -47,5 +47,5 @@ func (a *roundStampingAgent) Run(ctx context.Context, opts agent.RunOpts) (*agen
 }
 
 func (a *roundStampingAgent) SupportsMCP(server, purpose string) bool {
- return agent.SupportsMCP(a.inner, server, purpose)
+	return agent.SupportsMCP(a.inner, server, purpose)
 }

@@ -370,10 +370,10 @@ func codexMCPLoginCommand(bin string, env []string, server string, configArgs []
 	if home != "" {
 		command = "CODEX_HOME=" + shellQuote(home) + " " + command
 	}
- if len(configArgs) > 0 {
-  command = "Before login, supply the same trusted Codex configuration selectors (-c/--config, -p/--profile, or --ignore-user-config) used by this executor. Their values are omitted for privacy; obtain them from the daemon operator and apply them privately to the login command. Do not share credential values. Base command: " + command
- }
- return command
+	if len(configArgs) > 0 {
+		command = "Before login, supply the same trusted Codex configuration selectors (-c/--config, -p/--profile, or --ignore-user-config) used by this executor. Their values are omitted for privacy; obtain them from the daemon operator and apply them privately to the login command. Do not share credential values. Base command: " + command
+	}
+	return command
 }
 
 func codexHomeFromEnv(env []string) string {

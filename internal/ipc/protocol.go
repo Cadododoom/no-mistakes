@@ -33,7 +33,7 @@ const (
 	MethodHealth                    = "health"
 	MethodShutdown                  = "shutdown"
 	MethodUpdateRunClosingIssueRefs = "update_run_closing_issue_refs"
-	MethodProbeMCPReadiness = "probe_mcp_readiness"
+	MethodProbeMCPReadiness         = "probe_mcp_readiness"
 )
 
 // JSON-RPC 2.0 error codes.

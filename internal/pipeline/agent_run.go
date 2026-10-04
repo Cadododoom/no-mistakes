@@ -695,5 +695,5 @@ func (a *timeoutAgent) NeutralizesGateInstructions() bool {
 }
 
 func (a *timeoutAgent) SupportsMCP(server, purpose string) bool {
- return agent.SupportsMCP(a.inner, server, purpose)
+	return agent.SupportsMCP(a.inner, server, purpose)
 }
