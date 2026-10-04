@@ -1230,8 +1230,15 @@ rounds:
 					findings = mergeFindingsJSON(findings, outcome.Findings)
 					exitCode = outcome.ExitCode
 				}
+				// Reuse the step's invocation-control identity: all gate consumers
+				// must refuse approve/skip and retry validation without repairing
+				// this runtime condition as though it were a source defect.
+				incompleteID := types.FindingIDReviewAgentIncomplete
+				if stepName == types.StepTest {
+					incompleteID = types.FindingIDTestAgentIncomplete
+				}
 				interrupted, _ := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{{
-					ID: string(stepName) + "-agent-interrupted", Severity: types.FindingSeverityWarning,
+					ID: incompleteID, Severity: types.FindingSeverityWarning,
 					Action:      types.ActionAskUser,
 					Description: "Daemon shutdown interrupted this validation turn. Retry with fix to validate retained work, or abort.",
 				}}})

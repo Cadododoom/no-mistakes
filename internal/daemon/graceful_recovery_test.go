@@ -224,9 +224,13 @@ func TestGracefulShutdownPreservesDurableGatesAndWork(t *testing.T) {
 				}
 				defer recoveredClient.Close()
 				var response ipc.RespondResult
+				incompleteID := types.FindingIDReviewAgentIncomplete
+				if tc.stage == types.StepTest {
+					incompleteID = types.FindingIDTestAgentIncomplete
+				}
 				deadline := time.Now().Add(10 * time.Second)
 				for {
-					err = recoveredClient.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: run.ID, Step: tc.stage, Action: types.ActionFix, FindingIDs: []string{"pending", string(tc.stage) + "-agent-interrupted"}}, &response)
+					err = recoveredClient.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: run.ID, Step: tc.stage, Action: types.ActionFix, FindingIDs: []string{"pending", incompleteID}}, &response)
 					if err == nil {
 						break
 					}
